@@ -1,14 +1,16 @@
 # app.py
 import time
 from functools import partial
-from typing import Iterable, Tuple, List
+from typing import Iterable, Tuple, List, Dict, Optional, Union, Set
 from utils.scan_engine import run_scan
 from functions.weather import WeatherPredictor, DayWeather
 from functions.mines import MinesPredictor, DayInfested
+from functions.chests import ChestsPredictor
 
 # ========== 功能总开关 ==========
-ENABLE_WEATHER_FILTER = True   # 关掉则不按天气筛选
-ENABLE_MINES_FILTER   = True   # 关掉则不按怪物层筛选
+ENABLE_WEATHER_FILTER = True
+ENABLE_MINES_FILTER   = True
+ENABLE_CHESTS_FILTER  = True   # 混合宝箱筛选
 # =================================
 
 # ========= 天气筛选参数（仅在 ENABLE_WEATHER_FILTER=True 时生效） =========
@@ -28,12 +30,34 @@ FLOOR_END       = 90
 REQUIRE_NO_INFESTED = True  # True=要求“完全没有怪物/史莱姆层”
 # =====================================================================
 
+# ========= 混合宝箱筛选参数（支持嵌套 OR） =========
+# 顶层 CHEST_RULES_MODE:
+#   "ALL": 所有顶层条件需满足；顶层元素如果是列表 -> 该列表内“任一项”满足即可
+#   "ANY": 顶层任意一个条件满足即可；顶层元素如果是列表 -> 该列表内“任一项”满足即可
+# 规则举例：
+#   1) 20层=光辉戒指
+#      CHEST_RULES = [(20, "光辉戒指")]
+#   2) 20层=光辉戒指 且 (80层=长柄锤 或 110层=巨锤)
+#      CHEST_RULES_MODE = "ALL"
+#      CHEST_RULES = [ (20,"光辉戒指"), [ (80,"长柄锤"), (110,"巨锤") ] ]
+ChestAtom = Tuple[int, str]
+ChestGroup = List[ChestAtom]             # OR 组
+ChestRule = Union[ChestAtom, ChestGroup] # 顶层元素：单条 或 OR 组
+
+CHEST_RULES_MODE = "ALL"  # "ALL" 或 "ANY"
+CHEST_RULES: List[ChestRule] = [
+    # 示例：20层=磁铁戒指 且 (80层=长柄锤 或 110层=巨锤)
+    (20, "磁铁戒指"),
+    [(80, "长柄锤"), (110, "巨锤")],
+]
+# =====================================================================
+
 USE_LEGACY   = True
 SHOW_DATES   = True
-PROCESSES    = 0          # 0=auto
+PROCESSES    = 0
 CHUNKSIZE    = 1000
 
-# ---------- helper ----------
+# ---------- helpers ----------
 def match_days_in_range(wp: WeatherPredictor, start_day: int, end_day: int, targets: Tuple[str, ...]) -> List[DayWeather]:
     days = wp.predict_range(start_day, end_day)
     tset = set(targets)
@@ -59,13 +83,85 @@ def fmt_mines(details: List[DayInfested], floor_start: int, floor_end: int) -> s
             parts.append(f"Day{d.abs_day}: {bad}")
     return " | ".join(parts) if parts else "无"
 
-# ---------- 顶层 worker（可被 pickle） ----------
+# ====== 宝箱（支持嵌套 OR）的工具函数 ======
+def _collect_levels_from_rules(rules: List[ChestRule]) -> List[int]:
+    levels: Set[int] = set()
+    for rule in rules:
+        if isinstance(rule, list):
+            for lv, _ in rule:
+                levels.add(lv)
+        else:
+            lv, _ = rule
+            levels.add(lv)
+    return sorted(levels)
+
+def _normalize_rules(cp: ChestsPredictor, rules: List[ChestRule]) -> List[ChestRule]:
+    norm: List[ChestRule] = []
+    for rule in rules:
+        if isinstance(rule, list):
+            norm.append([(lv, cp.normalize_item(item)) for lv, item in rule])
+        else:
+            lv, item = rule
+            norm.append((lv, cp.normalize_item(item)))
+    return norm
+
+def check_chest_rules_nested(cp: ChestsPredictor, rules: List[ChestRule], mode: str) -> Tuple[bool, Dict[int, Optional[str]]]:
+    """
+    顶层 ALL/ANY；列表元素作为“OR 组”；单条为原子条件。
+    返回 (ok, {level: predicted_item_tag_or_name})
+    说明：预测结果用 cp.predict_levels(levels)（返回英文标准名），比较时也用标准名。
+    """
+    if not rules:
+        return True, {}
+
+    rules_norm = _normalize_rules(cp, rules)
+    levels = _collect_levels_from_rules(rules_norm)
+    # 预测：英文标准名或 None
+    pred = cp.predict_levels(levels)  # {level: canonical_en or None}
+
+    def atom_ok(atom: ChestAtom) -> bool:
+        lv, want = atom
+        return pred.get(lv) == want
+
+    def group_ok(group: ChestGroup) -> bool:
+        return any(atom_ok(a) for a in group)
+
+    satisfied_flags: List[bool] = []
+    for elem in rules_norm:
+        if isinstance(elem, list):
+            satisfied_flags.append(group_ok(elem))
+        else:
+            satisfied_flags.append(atom_ok(elem))
+
+    mode_u = mode.upper()
+    if mode_u == "ANY":
+        ok = any(satisfied_flags)
+    else:
+        ok = all(satisfied_flags)
+
+    return ok, pred
+
+def fmt_chests_human(cp: ChestsPredictor, details: Dict[int, Optional[str]]) -> str:
+    """用中文优先打印宝箱结果"""
+    pairs = []
+    for lv in sorted(details.keys()):
+        can = details[lv]
+        if can is None:
+            name = "（非宝箱层）"
+        else:
+            name = cp.display_name(can)
+        pairs.append(f"L{lv}={name}")
+    return ", ".join(pairs) if pairs else "无规则"
+
+# ---------- 顶层 worker ----------
 def worker(
     seed: int,
     # weather
     enable_weather: bool, start_day: int, end_day: int, targets: Tuple[str, ...], min_count: int, use_legacy: bool,
     # mines
     enable_mines: bool, mines_start: int, mines_end: int, floor_start: int, floor_end: int, require_no_infested: bool,
+    # chests
+    enable_chests: bool, chest_rules_mode: str, chest_rules: List[ChestRule],
 ):
     # 天气
     if enable_weather:
@@ -74,7 +170,7 @@ def worker(
         weather_ok = len(matched) >= min_count
     else:
         matched = []
-        weather_ok = True  # 不启用 => 视为通过
+        weather_ok = True
 
     # 矿井
     if enable_mines:
@@ -83,13 +179,21 @@ def worker(
             mines_ok, mines_detail = no_infested_in_range(mp, mines_start, mines_end, floor_start, floor_end)
         else:
             mines_detail = mp.predict_infested_in_range(mines_start, mines_end)
-            mines_ok = True  # 只展示，不作为筛选条件
+            mines_ok = True
     else:
         mines_detail = []
         mines_ok = True
 
-    ok = weather_ok and mines_ok
-    return seed, matched, mines_detail, ok
+    # 混合宝箱（嵌套 OR）
+    if enable_chests:
+        cp = ChestsPredictor(game_id=seed, use_legacy=use_legacy)
+        chests_ok, chests_detail = check_chest_rules_nested(cp, chest_rules, chest_rules_mode)
+    else:
+        chests_detail = {}
+        chests_ok = True
+
+    ok = weather_ok and mines_ok and chests_ok
+    return seed, matched, mines_detail, chests_detail, ok
 
 # ---------- main ----------
 def main():
@@ -110,6 +214,9 @@ def main():
         floor_start=FLOOR_START,
         floor_end=FLOOR_END,
         require_no_infested=REQUIRE_NO_INFESTED,
+        enable_chests=ENABLE_CHESTS_FILTER,
+        chest_rules_mode=CHEST_RULES_MODE,
+        chest_rules=CHEST_RULES,
     )
 
     t0 = time.time()
@@ -117,7 +224,7 @@ def main():
     elapsed = time.time() - t0
 
     hits = []
-    for seed, matched, mines_detail, ok in results:
+    for seed, matched, mines_detail, chests_detail, ok in results:
         if ok:
             hits.append(seed)
             print(f"命中种子 {seed}：", end="")
@@ -129,12 +236,17 @@ def main():
                     tags.append(f"矿井[{MINES_START_DAY}-{MINES_END_DAY}]楼层[{FLOOR_START}-{FLOOR_END}]无怪物层")
                 else:
                     tags.append("矿井筛选未启用或仅展示")
+            if ENABLE_CHESTS_FILTER:
+                tags.append("宝箱规则满足")
             print("；".join(tags) if tags else "（未启用任何筛选）")
             if SHOW_DATES:
                 if ENABLE_WEATHER_FILTER:
                     print("  天气日期：", fmt_weather(matched) or "无")
                 if ENABLE_MINES_FILTER and REQUIRE_NO_INFESTED:
                     print("  矿井异常：", fmt_mines(mines_detail, FLOOR_START, FLOOR_END))
+                if ENABLE_CHESTS_FILTER:
+                    cp_tmp = ChestsPredictor(game_id=seed, use_legacy=USE_LEGACY)
+                    print("  宝箱掉落：", fmt_chests_human(cp_tmp, chests_detail))
 
     print("\n=== 总结 ===")
     print(f"扫描范围：{SEED_START}..{SEED_END}（共 {SEED_END - SEED_START + 1} 个种子）")
@@ -147,6 +259,10 @@ def main():
         print(f"矿井区间：第 {MINES_START_DAY} 天 到 第 {MINES_END_DAY} 天；楼层 {FLOOR_START}-{FLOOR_END} {extra}")
     else:
         print("矿井筛选：已关闭")
+    if ENABLE_CHESTS_FILTER:
+        print(f"宝箱筛选：模式={CHEST_RULES_MODE}，规则={CHEST_RULES or '（未写规则）'}")
+    else:
+        print("宝箱筛选：已关闭")
     print(f"命中数量：{len(hits)}")
     if hits:
         print("前几个命中：", hits[:20])
