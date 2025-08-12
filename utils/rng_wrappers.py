@@ -1,24 +1,32 @@
 # utils/rng_wrappers.py
 # 1.6 的 RNG 封装（legacy 路径），严格对齐 mouseypounds 的 JS 语义
 
+import math
 from .dotnet_random import DotNetRandom
 
 MBIG = 2147483647  # 2^31 - 1
 
 def js_mod(a, m):
     """JS 风格取模：向零截断的余数（可能为负）"""
-    q = int(a / m)  # 向零截断（不同于 Python //）
+    q = int(a / m)  # 向零截断，模拟 JS 的除法取整
     return a - q * m
 
 def get_random_seed(a, b = 0, c = 0, d = 0, e = 0, *, use_legacy: bool = True) -> int:
     """
     legacy: Math.floor((a % M + b % M + c % M + d % M + e % M) % M)
-    这里 % 用 JS 语义（可能为负），因此我们用 js_mod。
+    注意：JS 用 Math.floor（向下取整），不能用 Python 的 int()（向零截断）。
+    返回值标准化为 int32（可能为负）。
     """
     if use_legacy:
         total = js_mod(a, MBIG) + js_mod(b, MBIG) + js_mod(c, MBIG) + js_mod(d, MBIG) + js_mod(e, MBIG)
         total = js_mod(total, MBIG)
-        return int(total)  # 可能为负
+        total = math.floor(total)  # 关键修复：与 JS Math.floor 对齐
+
+        # 规范到 int32 带符号范围
+        total &= 0xFFFFFFFF
+        if total >= 2**31:
+            total -= 2**32
+        return total
     else:
         raise NotImplementedError("use_legacy=False 留待后续实现（NetRandom / getHashFromArray）")
 
