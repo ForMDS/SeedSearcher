@@ -1,6 +1,5 @@
 # utils/dotnet_random.py
-# Python 还原版 C# System.Random
-# Stardew Valley 用它来生成伪随机数（legacy 模式下）
+# 精确还原 C# System.Random（legacy RNG）
 
 class DotNetRandom:
     MBIG = 2147483647
@@ -12,13 +11,17 @@ class DotNetRandom:
         self.inext = 0
         self.inextp = 21
 
-        subtraction = self.MSEED - abs(Seed)
-        if subtraction < 1:
-            subtraction = 1
-        self.SeedArray[55] = subtraction
-        mj = subtraction
-        mk = 1
+        subtraction = Seed
+        if subtraction == -2147483648:
+            subtraction = 2147483647
+        subtraction = abs(subtraction)
 
+        mj = self.MSEED - subtraction
+        if mj < 0:
+            mj += self.MBIG
+        self.SeedArray[55] = mj
+
+        mk = 1
         for i in range(1, 55):
             ii = (21 * i) % 55
             self.SeedArray[ii] = mk
@@ -27,7 +30,7 @@ class DotNetRandom:
                 mk += self.MBIG
             mj = self.SeedArray[ii]
 
-        for _ in range(4):
+        for k in range(1, 5):
             for i in range(1, 56):
                 self.SeedArray[i] -= self.SeedArray[1 + (i + 30) % 55]
                 if self.SeedArray[i] < 0:
@@ -53,6 +56,14 @@ class DotNetRandom:
     def Sample(self):
         return self.InternalSample() * (1.0 / self.MBIG)
 
+    def GetSampleForLargeRange(self):
+        result = self.InternalSample()
+        if self.InternalSample() % 2 == 0:
+            result = -result
+        d = result
+        d += self.MBIG - 1
+        return d / (2.0 * self.MBIG - 1)
+
     def Next(self, minValue=None, maxValue=None):
         if minValue is None:
             return self.InternalSample()
@@ -65,15 +76,7 @@ class DotNetRandom:
         range_ = maxValue - minValue
         if range_ <= self.MBIG:
             return int(self.Sample() * range_) + minValue
-        return int((self.GetSampleForLargeRange() * range_) + minValue)
-
-    def GetSampleForLargeRange(self):
-        result = self.InternalSample()
-        if self.InternalSample() % 2 == 0:
-            result = -result
-        d = result
-        d += self.MBIG - 1
-        return d / (2.0 * self.MBIG - 1)
+        return int(self.GetSampleForLargeRange() * range_) + minValue
 
     def NextDouble(self):
         return self.Sample()

@@ -1,55 +1,70 @@
+# app.py
 import time
-from typing import Iterable
+from functools import partial
+from typing import Iterable, Tuple, List
 from utils.scan_engine import run_scan
 from functions.weather import WeatherPredictor, DayWeather
 
-# ======= 运行参数 =======
-USE_LEGACY = True
-SHOW_RAIN_DAYS = True
+# ========= 在这里改参数 =========
+SEED_START   = 0
+SEED_END     = 10
+START_DAY    = 1
+END_DAY      = 28
+TARGET_TYPES = ("Rain", "Storm", "Green Rain")
+MIN_COUNT    = 6
+USE_LEGACY   = True
+SHOW_DATES   = True
+PROCESSES    = 0          # 0=auto
+CHUNKSIZE    = 1000
+# =================================
 
-# 扫描种子范围
-START_SEED = 0
-END_SEED   = 99999
-PROCESSES  = None        # None = 自动用所有CPU
-CHUNKSIZE  = 1000
-
-# 预测的天数范围（绝对天数：第1天=Spring 1 Year 1）
-WEATHER_START_DAY = 1
-WEATHER_END_DAY   = 28
-
-# 你想匹配的天气类型（可以改为任何组合，比如 ("Rain", "Storm")）
-TARGET_WEATHER = ("Rain", "Storm", "Green Rain")
-
-# ========================
-
-def count_weather_and_list(wp: WeatherPredictor, start_day: int, end_day: int, target: tuple[str, ...]):
+def match_days_in_range(wp: WeatherPredictor, start_day: int, end_day: int, targets: Tuple[str, ...]) -> List[DayWeather]:
     days = wp.predict_range(start_day, end_day)
-    matched = [d for d in days if d.weather_en in target]
-    return len(matched), matched
+    tset = set(targets)
+    return [d for d in days if d.weather_en in tset]
 
-def weather_worker(seed: int):
-    wp = WeatherPredictor(game_id=seed, use_legacy=USE_LEGACY)
-    count, matched_days = count_weather_and_list(wp, WEATHER_START_DAY, WEATHER_END_DAY, TARGET_WEATHER)
-    return seed, count, matched_days
+# 顶层 worker，保证可被 pickle
+def worker(seed: int, start_day: int, end_day: int, targets: Tuple[str, ...], use_legacy: bool):
+    wp = WeatherPredictor(game_id=seed, use_legacy=use_legacy)
+    matched = match_days_in_range(wp, start_day, end_day, targets)
+    return seed, matched
 
-def fmt_list(days: list[DayWeather]) -> str:
+def fmt_list(days: List[DayWeather]) -> str:
     return "、".join([f"{d.season_en}{d.dom}({d.weather_zh})" for d in days])
 
 def main():
-    seeds: Iterable[int] = range(START_SEED, END_SEED + 1)
+    seeds: Iterable[int] = range(SEED_START, SEED_END + 1)
+    processes = None if PROCESSES == 0 else PROCESSES
+
+    # 用 partial 绑定参数；注意 worker 是顶层函数 -> 可 pickle
+    mp_worker = partial(
+        worker,
+        start_day=START_DAY,
+        end_day=END_DAY,
+        targets=TARGET_TYPES,
+        use_legacy=USE_LEGACY,
+    )
+
     t0 = time.time()
-    results = run_scan(seeds, weather_worker, processes=PROCESSES, chunksize=CHUNKSIZE)
+    results = run_scan(seeds, mp_worker, processes=processes, chunksize=CHUNKSIZE)
     elapsed = time.time() - t0
 
-    for seed, count, matched in results:
-        if count > 0:  # 你可以改成 count >= X 作为条件
-            print(f"种子 {seed}: 共有 {count} 天符合条件")
-            if SHOW_RAIN_DAYS:
-                print(f"  天数: {fmt_list(matched)}")
+    hits = []
+    for seed, matched in results:
+        if len(matched) >= MIN_COUNT:
+            hits.append(seed)
+            print(f"命中种子 {seed}: 区间内命中 {len(matched)} 天")
+            if SHOW_DATES:
+                print("  日期：", fmt_list(matched) or "无")
 
     print("\n=== 总结 ===")
-    print(f"扫描范围：{START_SEED}..{END_SEED}（共 {END_SEED-START_SEED+1} 个种子）")
-    print(f"总耗时：{elapsed:.2f} 秒，进程数：{PROCESSES or 'auto'}，chunksize={CHUNKSIZE}")
+    print(f"扫描范围：{SEED_START}..{SEED_END}（共 {SEED_END - SEED_START + 1} 个种子）")
+    print(f"区间：第 {START_DAY} 天 到 第 {END_DAY} 天")
+    print(f"目标天气：{', '.join(TARGET_TYPES)}，最少 {MIN_COUNT} 天")
+    print(f"命中数量：{len(hits)}")
+    if hits:
+        print("前几个命中：", hits[:20])
+    print(f"总耗时：{elapsed:.2f} 秒，进程数：{processes or 'auto'}，chunksize={CHUNKSIZE}")
 
 if __name__ == "__main__":
     main()

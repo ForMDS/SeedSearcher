@@ -1,6 +1,6 @@
 # functions/weather.py
 from dataclasses import dataclass
-from typing import List, Literal, Tuple, Dict
+from typing import List, Literal, Dict
 from utils.dotnet_random import DotNetRandom
 from utils.rng_wrappers import get_random_seed, get_hash_from_string
 
@@ -38,9 +38,9 @@ class WeatherPredictor:
         self.use_legacy = bool(use_legacy)
 
     def _cs_random(self, seed: int) -> DotNetRandom:
-        return DotNetRandom(seed)
+        return DotNetRandom(seed)  # legacy only for now
 
-    def _seed_rng(self, *seed_args: int) -> DotNetRandom:
+    def _seed_rng(self, *seed_args) -> DotNetRandom:
         seed = get_random_seed(*seed_args, use_legacy=self.use_legacy)
         return self._cs_random(seed)
 
@@ -50,7 +50,7 @@ class WeatherPredictor:
 
     def _green_rain_day_for_summer(self, year: int) -> int:
         rng = self._seed_rng(year * 777, self.game_id)
-        return [5,6,7,14,15,16,18,23][rng.Next(8)]
+        return [5, 6, 7, 14, 15, 16, 18, 23][rng.Next(8)]
 
     def _roll_one(self, day1: int) -> DayWeather:
         day = day1
@@ -60,15 +60,18 @@ class WeatherPredictor:
         year = 1 + (day - 1) // 112
         d112 = day % 112
 
-        if day in (1,2,4) or (day % 28) == 1:
+        # Fixed days
+        if day in (1, 2, 4) or (day % 28) == 1:
             return DayWeather(day, season, dom, year, "Sun", WEATHER_ZH_MAP["Sun"], FESTIVAL_MAP.get(d112), d112 in FORCE_SUN_FESTIVALS)
         if day == 3:
             return DayWeather(day, season, dom, year, "Rain", WEATHER_ZH_MAP["Rain"], FESTIVAL_MAP.get(d112), False)
 
+        # Festival
         festival_name = FESTIVAL_MAP.get(d112)
         if festival_name and d112 in FORCE_SUN_FESTIVALS:
             return DayWeather(day, season, dom, year, "Sun", WEATHER_ZH_MAP["Sun"], festival_name, True)
 
+        # Seasonal rules
         if season in ("Spring", "Fall"):
             rng = self._seed_rng(get_hash_from_string("location_weather"), self.game_id, day - 1)
             w = "Rain" if rng.NextDouble() < 0.183 else "Sun"
@@ -76,26 +79,24 @@ class WeatherPredictor:
 
         if season == "Summer":
             gr = self._green_rain_day_for_summer(year)
-            rng = self._seed_rng(day - 1, self.game_id // 2, get_hash_from_string("summer_rain_chance"))
-            if dom == gr: w = "Green Rain"
-            elif dom % 13 == 0: w = "Storm"
+            # 注意：JS 用的是 / 2（浮点除法），不能用整除 //
+            rng = self._seed_rng(day - 1, self.game_id / 2, get_hash_from_string("summer_rain_chance"))
+            if dom == gr:
+                w = "Green Rain"
+            elif dom % 13 == 0:
+                w = "Storm"
             else:
-                rain_chance = 0.12 + 0.003*(dom - 1)
+                rain_chance = 0.12 + 0.003 * (dom - 1)
                 w = "Rain" if rng.NextDouble() < rain_chance else "Sun"
             return DayWeather(day, season, dom, year, w, WEATHER_ZH_MAP[w], festival_name, False)
 
-        # Winter 先占位（将来可扩展雪/风）
+        # Winter（先占位）
         return DayWeather(day, season, dom, year, "Sun", WEATHER_ZH_MAP["Sun"], festival_name, False)
 
     def predict_range(self, start_abs_day: int, end_abs_day: int) -> List[DayWeather]:
         if start_abs_day < 1 or end_abs_day < start_abs_day:
             raise ValueError("Invalid day range")
-        return [self._roll_one(d) for d in range(start_abs_day, end_abs_day+1)]
-
-    @staticmethod
-    def count_weather(days: List[DayWeather], include_en: tuple[WeatherEN, ...]) -> int:
-        s = set(include_en)
-        return sum(1 for d in days if d.weather_en in s)
+        return [self._roll_one(d) for d in range(start_abs_day, end_abs_day + 1)]
 
     @staticmethod
     def pretty_print(days: List[DayWeather]) -> None:
