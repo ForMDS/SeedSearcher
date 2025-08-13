@@ -29,7 +29,7 @@ class DesertFestivalPredictor:
 
     def _rng(self, day_abs: int) -> DotNetRandom:
         # 传统随机 + 整数除法 gameID//2
-        seed = get_random_seed(day_abs, self.game_id // 2, use_legacy=self.use_legacy)
+        seed = get_random_seed(day_abs, self.game_id / 2, use_legacy=self.use_legacy)
         return DotNetRandom(seed)
 
     def _build_pool_for_day(self, d: int) -> List[str]:
@@ -76,3 +76,7 @@ class DesertFestivalPredictor:
     def leah_in_festival(self) -> Dict[int, Tuple[bool, List[str]]]:
         vmap = self.vendors_for_three_days()
         return {d: ('Leah' in vmap[d], vmap[d]) for d in range(3)}
+
+    def jas_in_festival(self) -> Dict[int, Tuple[bool, List[str]]]:
+        vmap = self.vendors_for_three_days()
+        return {d: ('Jas' in vmap[d], vmap[d]) for d in range(3)}
