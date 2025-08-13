@@ -7,17 +7,22 @@ from functions.weather import WeatherPredictor, DayWeather
 from functions.mines import MinesPredictor, DayInfested
 from functions.chests import ChestsPredictor
 from functions.desert_festival import DesertFestivalPredictor
+from functions.trashcans import predict_saloon_trash_in_range
+
 
 # ========== 功能总开关 ==========
 ENABLE_WEATHER_FILTER = True  # 天气
 ENABLE_MINES_FILTER   = True  # 矿井怪物层
 ENABLE_CHESTS_FILTER  = True  # 混合宝箱筛选
 ENABLE_DESERT_FILTER  = True  # 沙漠节
+ENABLE_SALOON_FILTER = True   # 酒吧垃圾桶
 # =================================
 
+# ========= 种子范围 =========
+SEED_START = 1      # 从这里开始
+SEED_RANGE = 1000    # 共筛这么多个
+
 # ========= 天气筛选参数 =========
-SEED_START   = 0
-SEED_END     = 10000
 START_DAY    = 6
 END_DAY      = 7
 TARGET_TYPES = ("Rain", "Storm", "Green Rain")
@@ -57,6 +62,17 @@ CHEST_RULES: List[ChestRule] = [
 # ========= 沙漠节筛选参数 =========
 REQUIRE_LEAH = True  # 至少一天出现 Leah
 REQUIRE_JAS  = True  # 至少一天出现 Jas
+# =====================================================================
+
+# ===== Saloon 垃圾桶（日期区间）示例集成：开始 =====
+# 你可以把这些参数接到你的 GUI/CLI；这里先用演示值
+saloon_start_day = 1               # 开始日期（春1 = 1）
+saloon_end_day = 2                 # 结束日期
+saloon_daily_luck = -0.1           # 统一运势（或使用 daily_luck_by_day 覆盖）
+saloon_has_book = False            # 是否读过垃圾之书
+saloon_require_min_hit = 1         # 至少命中 N 天才算通过
+
+
 # =====================================================================
 
 USE_LEGACY   = True
@@ -153,6 +169,58 @@ def fmt_chests_human(cp: ChestsPredictor, details: Dict[int, Optional[str]]) -> 
         pairs.append(f"L{lv}={name}")
     return ", ".join(pairs) if pairs else "无规则"
 
+def evaluate_saloon_trash_range(
+    seed: int,
+    *,
+    start_day: int,
+    end_day: int,
+    daily_luck: float = -0.1,
+    has_garbage_book: bool = False,
+    daily_luck_by_day: dict | None = None,
+    require_min_hit_days: int = 1,   # 范围内至少出现多少次 Dish 才算合格（默认≥1）
+):
+    """
+    评估 [start_day, end_day] 范围内的“酒吧垃圾桶 DishOfTheDay”命中情况。
+    只统计 source == 'DishOfTheDay' 的天数；其他掉落既不计入也不淘汰。
+
+    返回: (ok, summary_text, detail_dict)
+      - ok: Dish 命中天数 >= require_min_hit_days
+      - summary_text: 如 "酒吧垃圾桶（Dish）命中 2/7 天（1,3）"
+      - detail_dict["summary"] 包含 dish_days, dish_days_hit 等字段
+    """
+    out = predict_saloon_trash_in_range(
+        seed,
+        start_day,
+        end_day,
+        has_garbage_book=has_garbage_book,
+        daily_luck=daily_luck,
+        daily_luck_by_day=daily_luck_by_day,
+    )
+    results = out["results"]
+    days_total = out["summary"]["days_total"]
+
+    dish_days = [d for d in range(start_day, end_day + 1) if results[d].source == "DishOfTheDay"]
+    dish_days_hit = len(dish_days)
+    ok = dish_days_hit >= max(1, int(require_min_hit_days))
+
+    if dish_days:
+        hit_str = ",".join(str(d) for d in dish_days)
+        tag = f"酒吧垃圾桶（Dish）命中 {dish_days_hit}/{days_total} 天（{hit_str}）"
+    else:
+        tag = f"酒吧垃圾桶（Dish）命中 0/{days_total} 天"
+
+    out_ext = {
+        "results": results,
+        "summary": {
+            **out["summary"],
+            "dish_days": dish_days,
+            "dish_days_hit": dish_days_hit,
+            "require_min_hit_days": int(require_min_hit_days),
+        }
+    }
+    return ok, tag, out_ext
+
+
 # ---------- 顶层 worker ----------
 def worker(
     seed: int,
@@ -194,7 +262,7 @@ def worker(
         chests_detail = {}
         chests_ok = True
 
-    # ========== 沙漠节（第一年 春15/16/17）==========
+    # 沙漠节（第一年 春15/16/17）
     desert_ok = True
     desert_detail: Dict[str, List[str]] = {}
     if enable_desert:
@@ -218,12 +286,33 @@ def worker(
         if require_jas and not has_jas:
             desert_ok = False
 
-    ok = weather_ok and mines_ok and chests_ok and desert_ok
-    return seed, matched, mines_detail, chests_detail, desert_detail, ok
+    # Saloon 垃圾桶（区间）
+    saloon_out = None
+    saloon_tag = None
+    ok_saloon = True
+    if ENABLE_SALOON_FILTER:
+        ok_saloon, saloon_tag, saloon_out = evaluate_saloon_trash_range(
+            seed,
+            start_day=saloon_start_day,
+            end_day=saloon_end_day,
+            daily_luck=saloon_daily_luck,
+            has_garbage_book=saloon_has_book,
+            daily_luck_by_day=None,
+            require_min_hit_days=saloon_require_min_hit,
+        )
+
+
+
+    # 总通过：若启用垃圾桶，则必须 ok_saloon
+    ok = weather_ok and mines_ok and chests_ok and desert_ok and (not ENABLE_SALOON_FILTER or ok_saloon)
+
+    # 返回包含垃圾桶信息，供主循环打印
+    return seed, matched, mines_detail, chests_detail, desert_detail, ok, saloon_out, saloon_tag, ok_saloon
+
 
 # ---------- main ----------
 def main():
-    seeds: Iterable[int] = range(SEED_START, SEED_END + 1)
+    seeds: Iterable[int] = range(SEED_START, SEED_START + SEED_RANGE + 1)
     processes = None if PROCESSES == 0 else PROCESSES
 
     mp_worker = partial(
@@ -253,7 +342,7 @@ def main():
     elapsed = time.time() - t0
 
     hits = []
-    for seed, matched, mines_detail, chests_detail, desert_detail, ok in results:
+    for seed, matched, mines_detail, chests_detail, desert_detail, ok, saloon_out, saloon_tag, ok_saloon in results:
         if ok:
             hits.append(seed)
             print(f"命中种子 {seed}：", end="")
@@ -269,7 +358,11 @@ def main():
                 tags.append("宝箱规则满足")
             if ENABLE_DESERT_FILTER:
                 tags.append("沙漠节命中")
+            if ENABLE_SALOON_FILTER and saloon_tag:
+                tags.append(saloon_tag)
+
             print("；".join(tags) if tags else "（未启用任何筛选）")
+
             if SHOW_DATES:
                 if ENABLE_WEATHER_FILTER:
                     print("  天气日期：", fmt_weather(matched) or "无")
@@ -279,29 +372,14 @@ def main():
                     cp_tmp = ChestsPredictor(game_id=seed, use_legacy=USE_LEGACY)
                     print("  宝箱掉落：", fmt_chests_human(cp_tmp, chests_detail))
                 if ENABLE_DESERT_FILTER and desert_detail:
-                    # 例：春15: [Leah, ...] | 春16: [...]
                     ds = " | ".join([f"{k}: {v}" for k, v in desert_detail.items()])
                     print("  沙漠节商人：", ds)
+                if ENABLE_SALOON_FILTER and saloon_out:
+                    s = saloon_out["summary"]
+                    hit_days = s.get("dish_days", [])
+                    hit_str = ",".join(map(str, hit_days)) if hit_days else "无"
+                    print(f"  酒吧垃圾桶（Dish）：命中 {s.get('dish_days_hit', 0)}/{s['days_total']} 天；日期：{hit_str}")
 
-    print("\n=== 总结 ===")
-    print(f"扫描范围：{SEED_START}..{SEED_END}（共 {SEED_END - SEED_START + 1} 个种子）")
-    if ENABLE_WEATHER_FILTER:
-        print(f"天气区间：第 {START_DAY} 天 到 第 {END_DAY} 天；目标={', '.join(TARGET_TYPES)}；最少 {MIN_COUNT} 天")
-    else:
-        print("天气筛选：已关闭")
-    if ENABLE_MINES_FILTER:
-        extra = "且无怪物层" if REQUIRE_NO_INFESTED else "（仅展示，不作筛选）"
-        print(f"矿井区间：第 {MINES_START_DAY} 天 到 第 {MINES_END_DAY} 天；楼层 {FLOOR_START}-{FLOOR_END} {extra}")
-    else:
-        print("矿井筛选：已关闭")
-    if ENABLE_CHESTS_FILTER:
-        print(f"宝箱筛选：模式={CHEST_RULES_MODE}，规则={CHEST_RULES or '（未写规则）'}")
-    else:
-        print("宝箱筛选：已关闭")
-    if ENABLE_DESERT_FILTER:
-        print(f"沙漠节筛选：莉亚={REQUIRE_LEAH}，贾斯={REQUIRE_JAS}")
-    else:
-        print("沙漠节筛选：已关闭")
     print(f"命中数量：{len(hits)}")
     if hits:
         print("前几个命中：", hits[:20])
