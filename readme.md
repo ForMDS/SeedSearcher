@@ -41,3 +41,8 @@ SEED_START / SEED_END
 https://chatgpt.com/share/689b3861-f358-800b-9b32-b29165e96267
 
 功能五：垃圾桶
+提供起始、结束日期（含）：saloon_start_day / saloon_end_day
+在日期范围内，酒吧垃圾桶至少一次出现每日菜品
+
+功能六：仙子
+春1晚上出现仙子

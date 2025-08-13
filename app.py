@@ -8,25 +8,33 @@ from functions.mines import MinesPredictor, DayInfested
 from functions.chests import ChestsPredictor
 from functions.desert_festival import DesertFestivalPredictor
 from functions.trashcans import predict_saloon_trash_in_range
+from functions.night_events import predict_night_event_for_day
 
 
 # ========== 功能总开关 ==========
 ENABLE_WEATHER_FILTER = True  # 天气
-ENABLE_MINES_FILTER   = True  # 矿井怪物层
-ENABLE_CHESTS_FILTER  = True  # 混合宝箱筛选
-ENABLE_DESERT_FILTER  = True  # 沙漠节
-ENABLE_SALOON_FILTER = True   # 酒吧垃圾桶
+ENABLE_MINES_FILTER   = False  # 矿井怪物层
+ENABLE_CHESTS_FILTER  = False  # 混合宝箱筛选
+ENABLE_DESERT_FILTER  = False  # 沙漠节
+ENABLE_SALOON_FILTER = False   # 酒吧垃圾桶
+ENABLE_NIGHT_EVENT_FILTER = True   # 夜间事件（仙子）
 # =================================
 
 # ========= 种子范围 =========
-SEED_START = 1      # 从这里开始
-SEED_RANGE = 1000    # 共筛这么多个
+SEED_START = 450      # 从这里开始
+SEED_RANGE = 500    # 共筛这么多个
 
-# ========= 天气筛选参数 =========
-START_DAY    = 6
-END_DAY      = 7
-TARGET_TYPES = ("Rain", "Storm", "Green Rain")
-MIN_COUNT    = 1
+# ========= 天气筛选参数（多区间规则）=========
+TARGET_TYPES = ("Rain", "Storm", "Green Rain")  # 默认雨天类型集合
+
+# 每条规则：start, end, min_count, 可选 targets（不写则用上面的 TARGET_TYPES）
+WEATHER_CLAUSES: List[Dict] = [
+    {"start": 6,  "end": 7,  "min_count": 1},                               # 春6-7 ≥ 1
+    {"start": 18, "end": 28, "min_count": 4},                               # 春18-28 ≥ 4
+    # 还可以继续加：{"start": X, "end": Y, "min_count": Z, "targets": ("Rain","Storm")}
+]
+# =====================================================================
+
 # =====================================================================
 
 # ========= 矿井筛选参数 =========
@@ -73,6 +81,9 @@ saloon_has_book = False            # 是否读过垃圾之书
 saloon_require_min_hit = 1         # 至少命中 N 天才算通过
 
 
+# ===== Saloon 垃圾桶（日期区间）示例集成：开始 =====
+NIGHT_CHECK_DAY = 1                # 检查“春1”的夜间事件
+NIGHT_GREENHOUSE_UNLOCKED = False  # 温室已修复？只影响风暴提示，不影响仙子判定
 # =====================================================================
 
 USE_LEGACY   = True
@@ -81,6 +92,53 @@ PROCESSES    = 0
 CHUNKSIZE    = 1000
 
 # ---------- helpers ----------
+
+def evaluate_weather_clauses(
+    wp: WeatherPredictor,
+    clauses: List[Dict],
+    default_targets: Tuple[str, ...]
+) -> Tuple[bool, List[DayWeather]]:
+    """
+    逐条规则评估天气：
+      - 每条 {start, end, min_count, targets?} 都必须满足
+      - 返回 (ok_all, matched_union_days)
+        * matched_union_days：把所有规则中命中的天（满足 targets 的日子）去重合并后按天排序
+    为了少算 RNG，我们先算整段包络再筛。
+    """
+    if not clauses:
+        return True, []
+
+    # 计算包络区间
+    mn = min(int(c["start"]) for c in clauses)
+    mx = max(int(c["end"]) for c in clauses)
+    all_days = wp.predict_range(mn, mx)  # List[DayWeather]，包含 mn..mx
+
+    # 辅助索引：abs_day -> DayWeather
+    by_day: Dict[int, DayWeather] = {d.abs_day: d for d in all_days}
+
+    ok_all = True
+    matched_union: Dict[int, DayWeather] = {}
+
+    for c in clauses:
+        s = int(c["start"]); e = int(c["end"]); need = int(c["min_count"])
+        t = tuple(c.get("targets", default_targets))
+        tset = set(t)
+
+        # 当前规则命中天
+        hits = []
+        for day in range(s, e + 1):
+            dw = by_day.get(day)
+            if dw and dw.weather_en in tset:
+                hits.append(dw)
+                matched_union[dw.abs_day] = dw  # 合并去重
+
+        if len(hits) < need:
+            ok_all = False  # 任何一条不满足则整体不通过
+
+    # 合并后的天按绝对日排序
+    merged = [by_day[d] for d in sorted(matched_union.keys())]
+    return ok_all, merged
+
 def match_days_in_range(wp: WeatherPredictor, start_day: int, end_day: int, targets: Tuple[str, ...]) -> List[DayWeather]:
     days = wp.predict_range(start_day, end_day)
     tset = set(targets)
@@ -225,7 +283,7 @@ def evaluate_saloon_trash_range(
 def worker(
     seed: int,
     # weather
-    enable_weather: bool, start_day: int, end_day: int, targets: Tuple[str, ...], min_count: int, use_legacy: bool,
+    enable_weather: bool, weather_clauses: List[Dict], targets: Tuple[str, ...], use_legacy: bool,
     # mines
     enable_mines: bool, mines_start: int, mines_end: int, floor_start: int, floor_end: int, require_no_infested: bool,
     # chests
@@ -233,14 +291,14 @@ def worker(
     # desert festival
     enable_desert: bool, require_leah: bool, require_jas: bool,
 ):
-    # 天气
+    # 天气（多区间规则 AND）
     if enable_weather:
         wp = WeatherPredictor(game_id=seed, use_legacy=use_legacy)
-        matched = match_days_in_range(wp, start_day, end_day, targets)
-        weather_ok = len(matched) >= min_count
+        weather_ok, matched = evaluate_weather_clauses(wp, weather_clauses, targets)
     else:
         matched = []
         weather_ok = True
+
 
     # 矿井
     if enable_mines:
@@ -289,9 +347,9 @@ def worker(
     # Saloon 垃圾桶（区间）
     saloon_out = None
     saloon_tag = None
-    ok_saloon = True
+    saloon_ok = True
     if ENABLE_SALOON_FILTER:
-        ok_saloon, saloon_tag, saloon_out = evaluate_saloon_trash_range(
+        saloon_ok, saloon_tag, saloon_out = evaluate_saloon_trash_range(
             seed,
             start_day=saloon_start_day,
             end_day=saloon_end_day,
@@ -301,13 +359,33 @@ def worker(
             require_min_hit_days=saloon_require_min_hit,
         )
 
+    # 夜间事件（例如：春1 夜是否为 Fairy）
+    night_detail = None
+    night_ok = True
+    if ENABLE_NIGHT_EVENT_FILTER:
+        ne = predict_night_event_for_day(
+            seed,
+            NIGHT_CHECK_DAY,
+            day_adjust=0,
+            greenhouse_unlocked=NIGHT_GREENHOUSE_UNLOCKED,
+        )
+        night_detail = ne
+        night_ok = ne.is_fairy  # 只有当晚是 Fairy 才通过
 
 
-    # 总通过：若启用垃圾桶，则必须 ok_saloon
-    ok = weather_ok and mines_ok and chests_ok and desert_ok and (not ENABLE_SALOON_FILTER or ok_saloon)
+    # 总通过
+        ok = (
+        weather_ok
+        and mines_ok
+        and chests_ok
+        and desert_ok
+        and saloon_ok
+        and night_ok 
+    )
+
 
     # 返回包含垃圾桶信息，供主循环打印
-    return seed, matched, mines_detail, chests_detail, desert_detail, ok, saloon_out, saloon_tag, ok_saloon
+    return seed, matched, mines_detail, chests_detail, desert_detail, ok, saloon_out, saloon_tag, saloon_ok, night_detail, night_ok
 
 
 # ---------- main ----------
@@ -318,10 +396,8 @@ def main():
     mp_worker = partial(
         worker,
         enable_weather=ENABLE_WEATHER_FILTER,
-        start_day=START_DAY,
-        end_day=END_DAY,
+        weather_clauses=WEATHER_CLAUSES,
         targets=TARGET_TYPES,
-        min_count=MIN_COUNT,
         use_legacy=USE_LEGACY,
         enable_mines=ENABLE_MINES_FILTER,
         mines_start=MINES_START_DAY,
@@ -342,7 +418,7 @@ def main():
     elapsed = time.time() - t0
 
     hits = []
-    for seed, matched, mines_detail, chests_detail, desert_detail, ok, saloon_out, saloon_tag, ok_saloon in results:
+    for seed, matched, mines_detail, chests_detail, desert_detail, ok, saloon_out, saloon_tag, saloon_ok, night_detail, night_ok in results:
         if ok:
             hits.append(seed)
             print(f"命中种子 {seed}：", end="")
@@ -360,6 +436,8 @@ def main():
                 tags.append("沙漠节命中")
             if ENABLE_SALOON_FILTER and saloon_tag:
                 tags.append(saloon_tag)
+            if ENABLE_NIGHT_EVENT_FILTER and night_ok:
+                tags.append(f"春{NIGHT_CHECK_DAY}夜=Fairy")
 
             print("；".join(tags) if tags else "（未启用任何筛选）")
 
@@ -379,6 +457,8 @@ def main():
                     hit_days = s.get("dish_days", [])
                     hit_str = ",".join(map(str, hit_days)) if hit_days else "无"
                     print(f"  酒吧垃圾桶（Dish）：命中 {s.get('dish_days_hit', 0)}/{s['days_total']} 天；日期：{hit_str}")
+                if ENABLE_NIGHT_EVENT_FILTER and night_detail is not None:
+                    print(f"  夜间事件：春{NIGHT_CHECK_DAY}夜 -> {night_detail.event}")
 
     print(f"命中数量：{len(hits)}")
     if hits:
