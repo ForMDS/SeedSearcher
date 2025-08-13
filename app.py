@@ -12,26 +12,34 @@ from functions.night_events import predict_night_event_for_day
 
 
 # ========== 功能总开关 ==========
-ENABLE_WEATHER_FILTER = True  # 天气
-ENABLE_MINES_FILTER   = True  # 矿井怪物层
+ENABLE_WEATHER_FILTER = False  # 天气
+ENABLE_MINES_FILTER   = False  # 矿井怪物层
+ENABLE_CHESTS_FILTER  = False  # 混合宝箱筛选
+ENABLE_DESERT_FILTER  = False  # 沙漠节
+ENABLE_SALOON_FILTER = False   # 酒吧垃圾桶
+ENABLE_NIGHT_EVENT_FILTER = False   # 夜间事件（仙子）
+
+# ENABLE_WEATHER_FILTER = True  # 天气
+# ENABLE_MINES_FILTER   = True  # 矿井怪物层
 ENABLE_CHESTS_FILTER  = True  # 混合宝箱筛选
-ENABLE_DESERT_FILTER  = True  # 沙漠节
-ENABLE_SALOON_FILTER = True   # 酒吧垃圾桶
-ENABLE_NIGHT_EVENT_FILTER = True   # 夜间事件（仙子）
+# ENABLE_DESERT_FILTER  = True  # 沙漠节
+# ENABLE_SALOON_FILTER = True   # 酒吧垃圾桶
+# ENABLE_NIGHT_EVENT_FILTER = True   # 夜间事件（仙子）
 # =================================
 
 # ========= 种子范围 =========
 SEED_START = 0      # 从这里开始
-SEED_RANGE =     # 共筛这么多个
+SEED_RANGE = 500    # 共筛这么多个
 
 # ========= 天气筛选参数（多区间规则）=========
 TARGET_TYPES = ("Rain", "Storm", "Green Rain")  # 默认雨天类型集合
 
 # 每条规则：start, end, min_count, 可选 targets（不写则用上面的 TARGET_TYPES）
 WEATHER_CLAUSES: List[Dict] = [
-    {"start": 6,  "end": 7,  "min_count": 1},                               # 春6-7 ≥ 1
-    {"start": 18, "end": 28, "min_count": 4},                               # 春18-28 ≥ 4
-    # 还可以继续加：{"start": X, "end": Y, "min_count": Z, "targets": ("Rain","Storm")}
+    {"start": 7,  "end": 7,  "min_count": 1},                               
+    {"start": 14, "end": 26, "min_count": 4},                               
+    {"start": 30, "end": 27, "min_count": 10},                               
+    # 还可以继续加：{"start": X, "end": Y, "min_count": Z, "targets": ("Rain","Storm")} # 从日期X到Y，至少Z天targets类型的天气
 ]
 # =====================================================================
 
@@ -41,7 +49,7 @@ WEATHER_CLAUSES: List[Dict] = [
 MINES_START_DAY = 5     # 绝对天数
 MINES_END_DAY   = 5
 FLOOR_START     = 1
-FLOOR_END       = 90
+FLOOR_END       = 85
 REQUIRE_NO_INFESTED = True  # True=要求“完全没有怪物/史莱姆层”
 # =====================================================================
 
@@ -59,11 +67,13 @@ ChestAtom = Tuple[int, str]
 ChestGroup = List[ChestAtom]             # OR 组
 ChestRule = Union[ChestAtom, ChestGroup] # 顶层元素：单条 或 OR 组
 
-CHEST_RULES_MODE = "ALL"  # "ALL" 或 "ANY"
+CHEST_RULES_MODE = "ALL"
 CHEST_RULES: List[ChestRule] = [
-    # 示例：20层=磁铁戒指 且 (80层=长柄锤 或 110层=巨锤)
     (20, "磁铁戒指"),
-    [(80, "长柄锤"), (110, "巨锤")],
+    [   # 这是一个 OR 组
+        [ (80, "长柄锤"),   (110, "太空之靴") ],  # AND 子组 A
+        [ (80, "蹈火者靴"), (110, "巨锤") ],      # AND 子组 B
+    ],
 ]
 # =====================================================================
 
@@ -162,24 +172,29 @@ def fmt_mines(details: List[DayInfested], floor_start: int, floor_end: int) -> s
 # ====== 宝箱（支持嵌套 OR）的工具函数 ======
 def _collect_levels_from_rules(rules: List[ChestRule]) -> List[int]:
     levels: Set[int] = set()
-    for rule in rules:
-        if isinstance(rule, list):
-            for lv, _ in rule:
-                levels.add(lv)
+
+    def walk(node):
+        if isinstance(node, list):
+            for x in node:
+                walk(x)
         else:
-            lv, _ = rule
+            lv, _ = node
             levels.add(lv)
+
+    for r in rules:
+        walk(r)
     return sorted(levels)
 
+
 def _normalize_rules(cp: ChestsPredictor, rules: List[ChestRule]) -> List[ChestRule]:
-    norm: List[ChestRule] = []
-    for rule in rules:
-        if isinstance(rule, list):
-            norm.append([(lv, cp.normalize_item(item)) for lv, item in rule])
+    def norm_node(node):
+        if isinstance(node, list):
+            return [norm_node(x) for x in node]  # 递归：OR 组或 AND 子组
         else:
-            lv, item = rule
-            norm.append((lv, cp.normalize_item(item)))
-    return norm
+            lv, item = node
+            return (lv, cp.normalize_item(item))  # 中文/别名 → 规范英文
+    return [norm_node(r) for r in rules]
+
 
 def check_chest_rules_nested(cp: ChestsPredictor, rules: List[ChestRule], mode: str) -> Tuple[bool, Dict[int, Optional[str]]]:
     if not rules:
@@ -193,22 +208,29 @@ def check_chest_rules_nested(cp: ChestsPredictor, rules: List[ChestRule], mode: 
         lv, want = atom
         return pred.get(lv) == want
 
-    def group_ok(group: ChestGroup) -> bool:
-        return any(atom_ok(a) for a in group)
+    def or_group_ok(group: List[Union[ChestAtom, List[ChestAtom]]]) -> bool:
+        """
+        OR 组：任一元素满足即可
+          - 元素若为 atom：等价于 AND(单个)
+          - 元素若为 List[atom]：视作 AND 子组（全部命中）
+        """
+        for elem in group:
+            if isinstance(elem, list):          # AND 子组
+                if all(atom_ok(a) for a in elem):
+                    return True
+            else:                               # 单个 atom
+                if atom_ok(elem):
+                    return True
+        return False
 
-    satisfied_flags: List[bool] = []
-    for elem in rules_norm:
-        if isinstance(elem, list):
-            satisfied_flags.append(group_ok(elem))
-        else:
-            satisfied_flags.append(atom_ok(elem))
+    def eval_top(node) -> bool:
+        if isinstance(node, list):             # OR 组
+            return or_group_ok(node)
+        else:                                   # 原子
+            return atom_ok(node)
 
-    mode_u = mode.upper()
-    if mode_u == "ANY":
-        ok = any(satisfied_flags)
-    else:
-        ok = all(satisfied_flags)
-
+    flags = [eval_top(n) for n in rules_norm]
+    ok = any(flags) if mode.upper() == "ANY" else all(flags)
     return ok, pred
 
 def fmt_chests_human(cp: ChestsPredictor, details: Dict[int, Optional[str]]) -> str:
@@ -286,100 +308,138 @@ def worker(
     # desert festival
     enable_desert: bool, require_leah: bool, require_jas: bool,
 ):
-    # 天气（多区间规则 AND）
-    if enable_weather:
-        wp = WeatherPredictor(game_id=seed, use_legacy=use_legacy)
-        weather_ok, matched = evaluate_weather_clauses(wp, weather_clauses, targets)
-    else:
-        matched = []
-        weather_ok = True
-
-
-    # 矿井
-    if enable_mines:
-        mp = MinesPredictor(game_id=seed, use_legacy=use_legacy)
-        if require_no_infested:
-            mines_ok, mines_detail = no_infested_in_range(mp, mines_start, mines_end, floor_start, floor_end)
-        else:
-            mines_detail = mp.predict_infested_in_range(mines_start, mines_end)
-            mines_ok = True
-    else:
-        mines_detail = []
-        mines_ok = True
-
-    # 混合宝箱
-    if enable_chests:
-        cp = ChestsPredictor(game_id=seed, use_legacy=use_legacy)
-        chests_ok, chests_detail = check_chest_rules_nested(cp, chest_rules, chest_rules_mode)
-    else:
-        chests_detail = {}
-        chests_ok = True
-
-    # 沙漠节（第一年 春15/16/17）
-    desert_ok = True
+    """
+    动态估价 + 短路：
+      - 将启用的功能封装为任务，估算成本并排序
+      - 按成本从小到大执行；任一项失败立即返回
+    返回结构保持不变。
+    """
+    # 默认返回容器（短路时也能返回）
+    matched: List[DayWeather] = []
+    mines_detail: List[DayInfested] = []
+    chests_detail: Dict[int, Optional[str]] = {}
     desert_detail: Dict[str, List[str]] = {}
-    if enable_desert:
-        df = DesertFestivalPredictor(
-            game_id=seed,
-            use_legacy=use_legacy,
-            year=1,
-            leo_moved=False,
-            debug=False
-        )
-        # {0:[v1,v2], 1:[v1,v2], 2:[v1,v2]}
-        res = df.vendors_for_three_days()
-        v15, v16, v17 = res[0], res[1], res[2]
-        desert_detail = {"春15": v15, "春16": v16, "春17": v17}
-
-        has_leah = any("Leah" in vendors for vendors in (v15, v16, v17))
-        has_jas  = any("Jas"  in vendors for vendors in (v15, v16, v17))
-
-        if require_leah and not has_leah:
-            desert_ok = False
-        if require_jas and not has_jas:
-            desert_ok = False
-
-    # Saloon 垃圾桶（区间）
     saloon_out = None
     saloon_tag = None
     saloon_ok = True
-    if ENABLE_SALOON_FILTER:
-        saloon_ok, saloon_tag, saloon_out = evaluate_saloon_trash_range(
-            seed,
-            start_day=saloon_start_day,
-            end_day=saloon_end_day,
-            daily_luck=saloon_daily_luck,
-            has_garbage_book=saloon_has_book,
-            daily_luck_by_day=None,
-            require_min_hit_days=saloon_require_min_hit,
-        )
-
-    # 夜间事件（例如：春1 夜是否为 Fairy）
     night_detail = None
     night_ok = True
+
+    tasks = []  # (name, cost_estimate, fn)
+
+    # 夜间事件
     if ENABLE_NIGHT_EVENT_FILTER:
-        ne = predict_night_event_for_day(
-            seed,
-            NIGHT_CHECK_DAY,
-            day_adjust=0,
-            greenhouse_unlocked=NIGHT_GREENHOUSE_UNLOCKED,
-        )
-        night_detail = ne
-        night_ok = ne.is_fairy  # 只有当晚是 Fairy 才通过
+        cost_night = 1
+        def _eval_night():
+            nonlocal night_detail, night_ok
+            ne = predict_night_event_for_day(
+                seed,
+                NIGHT_CHECK_DAY,
+                day_adjust=0,
+                greenhouse_unlocked=NIGHT_GREENHOUSE_UNLOCKED,
+            )
+            night_detail = ne
+            night_ok = ne.is_fairy
+            return night_ok
+        tasks.append(("night", cost_night, _eval_night))
 
+    # 沙漠节
+    if enable_desert:
+        cost_desert = 3  # 固定 3 天
+        def _eval_desert():
+            nonlocal desert_detail
+            ok = True
+            df = DesertFestivalPredictor(
+                game_id=seed,
+                use_legacy=use_legacy,
+                year=1,
+                leo_moved=False,
+                debug=False
+            )
+            res = df.vendors_for_three_days()
+            v15, v16, v17 = res[0], res[1], res[2]
+            desert_detail = {"春15": v15, "春16": v16, "春17": v17}
+            has_leah = any("Leah" in vendors for vendors in (v15, v16, v17))
+            has_jas  = any("Jas"  in vendors for vendors in (v15, v16, v17))
+            if require_leah and not has_leah:
+                ok = False
+            if require_jas and not has_jas:
+                ok = False
+            return ok
+        tasks.append(("desert", cost_desert, _eval_desert))
 
-    # 总通过
-    ok = (
-        weather_ok
-        and mines_ok
-        and chests_ok
-        and desert_ok
-        and saloon_ok
-        and night_ok 
-    )
+    # 宝箱
+    if enable_chests:
+        unique_levels = len(_collect_levels_from_rules(chest_rules))
+        cost_chests = max(1, unique_levels)
+        def _eval_chests():
+            nonlocal chests_detail
+            cp = ChestsPredictor(game_id=seed, use_legacy=use_legacy)
+            ok, detail = check_chest_rules_nested(cp, chest_rules, chest_rules_mode)
+            chests_detail = detail
+            return ok
+        tasks.append(("chests", cost_chests, _eval_chests))
 
+    # 天气（多区间 AND）
+    if enable_weather:
+        # 估算成本：所有子区间长度之和（更贴近实际）
+        cost_weather = max(1, sum(int(c["end"]) - int(c["start"]) + 1 for c in weather_clauses))
+        def _eval_weather():
+            nonlocal matched
+            wp = WeatherPredictor(game_id=seed, use_legacy=use_legacy)
+            ok, matched_days = evaluate_weather_clauses(wp, weather_clauses, targets)
+            matched = matched_days
+            return ok
+        tasks.append(("weather", cost_weather, _eval_weather))
 
-    # 返回包含垃圾桶信息，供主循环打印
+    # 垃圾桶
+    if ENABLE_SALOON_FILTER:
+        span_saloon = max(0, saloon_end_day - saloon_start_day + 1)
+        cost_saloon = max(1, span_saloon * 220)  # 经验系数
+        def _eval_saloon():
+            nonlocal saloon_out, saloon_tag, saloon_ok
+            saloon_ok, saloon_tag, saloon_out = evaluate_saloon_trash_range(
+                seed,
+                start_day=saloon_start_day,
+                end_day=saloon_end_day,
+                daily_luck=saloon_daily_luck,
+                has_garbage_book=saloon_has_book,
+                daily_luck_by_day=None,
+                require_min_hit_days=saloon_require_min_hit,
+            )
+            return saloon_ok
+        tasks.append(("saloon", cost_saloon, _eval_saloon))
+
+    # 矿井
+    if enable_mines:
+        span_mines = max(0, mines_end - mines_start + 1)
+        cost_mines = max(1, span_mines * 1000)  # 经验系数（相对最贵）
+        def _eval_mines():
+            nonlocal mines_detail
+            mp = MinesPredictor(game_id=seed, use_legacy=use_legacy)
+            if require_no_infested:
+                ok, mines_detail_local = no_infested_in_range(mp, mines_start, mines_end, floor_start, floor_end)
+                mines_detail = mines_detail_local
+                return ok
+            else:
+                mines_detail = mp.predict_infested_in_range(mines_start, mines_end)
+                return True
+        tasks.append(("mines", cost_mines, _eval_mines))
+
+    # 没开任何功能 → 直接通过
+    if not tasks:
+        ok = True
+        return seed, matched, mines_detail, chests_detail, desert_detail, ok, saloon_out, saloon_tag, saloon_ok, night_detail, night_ok
+
+    # 动态排序 + 短路
+    tasks.sort(key=lambda x: x[1])
+    for _name, _cost, fn in tasks:
+        if not fn():
+            ok = False
+            return seed, matched, mines_detail, chests_detail, desert_detail, ok, saloon_out, saloon_tag, saloon_ok, night_detail, night_ok
+
+    # 全部通过
+    ok = True
     return seed, matched, mines_detail, chests_detail, desert_detail, ok, saloon_out, saloon_tag, saloon_ok, night_detail, night_ok
 
 
