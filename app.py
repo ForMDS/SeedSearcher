@@ -13,16 +13,16 @@ from functions.night_events import predict_night_event_for_day
 
 # ========== 功能总开关 ==========
 ENABLE_WEATHER_FILTER = True  # 天气
-ENABLE_MINES_FILTER   = False  # 矿井怪物层
-ENABLE_CHESTS_FILTER  = False  # 混合宝箱筛选
-ENABLE_DESERT_FILTER  = False  # 沙漠节
-ENABLE_SALOON_FILTER = False   # 酒吧垃圾桶
+ENABLE_MINES_FILTER   = True  # 矿井怪物层
+ENABLE_CHESTS_FILTER  = True  # 混合宝箱筛选
+ENABLE_DESERT_FILTER  = True  # 沙漠节
+ENABLE_SALOON_FILTER = True   # 酒吧垃圾桶
 ENABLE_NIGHT_EVENT_FILTER = True   # 夜间事件（仙子）
 # =================================
 
 # ========= 种子范围 =========
-SEED_START = 450      # 从这里开始
-SEED_RANGE = 500    # 共筛这么多个
+SEED_START = 0      # 从这里开始
+SEED_RANGE =     # 共筛这么多个
 
 # ========= 天气筛选参数（多区间规则）=========
 TARGET_TYPES = ("Rain", "Storm", "Green Rain")  # 默认雨天类型集合
@@ -138,11 +138,6 @@ def evaluate_weather_clauses(
     # 合并后的天按绝对日排序
     merged = [by_day[d] for d in sorted(matched_union.keys())]
     return ok_all, merged
-
-def match_days_in_range(wp: WeatherPredictor, start_day: int, end_day: int, targets: Tuple[str, ...]) -> List[DayWeather]:
-    days = wp.predict_range(start_day, end_day)
-    tset = set(targets)
-    return [d for d in days if d.weather_en in tset]
 
 def no_infested_in_range(mp: MinesPredictor, start_day: int, end_day: int, floor_start: int, floor_end: int) -> Tuple[bool, List[DayInfested]]:
     all_days = mp.predict_infested_in_range(start_day, end_day)
@@ -374,7 +369,7 @@ def worker(
 
 
     # 总通过
-        ok = (
+    ok = (
         weather_ok
         and mines_ok
         and chests_ok
