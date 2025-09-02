@@ -1,4 +1,5 @@
-# app.py
+from flask import Flask, send_from_directory, request, jsonify
+import os
 import time
 from functools import partial
 from typing import Iterable, Tuple, List, Dict, Optional, Union, Set
@@ -10,6 +11,44 @@ from functions.desert_festival import DesertFestivalPredictor
 from functions.trashcans import predict_saloon_trash_in_range
 from functions.night_events import predict_night_event_for_day
 
+
+dist_path = os.path.join(os.path.dirname(__file__), 'frontend', 'dist')
+app = Flask(__name__, static_folder=dist_path, template_folder=dist_path)
+
+# 首页和静态资源
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def serve_vue(path):
+    file_path = os.path.join(app.static_folder, path)
+    if path != "" and os.path.exists(file_path):
+        return send_from_directory(app.static_folder, path)
+    else:
+        return send_from_directory(app.static_folder, 'index.html')
+
+# 天气预测 API
+@app.route('/api/weather', methods=['POST'])
+def api_weather():
+    data = request.get_json()
+    seed = data.get('seed', 0)
+    clauses = data.get('clauses', WEATHER_CLAUSES)
+    targets = tuple(data.get('targets', TARGET_TYPES))
+
+    wp = WeatherPredictor(game_id=seed)
+    ok, matched = evaluate_weather_clauses(wp, clauses, targets)
+
+    result = {
+        'ok': ok,
+        'matched_days': [
+            {
+                'abs_day': d.abs_day,
+                'season': d.season_en,
+                'day': d.dom,
+                'weather': d.weather_en,
+                'weather_zh': d.weather_zh
+            } for d in matched
+        ]
+    }
+    return jsonify(result)
 
 # ========== 功能总开关 ==========
 ENABLE_WEATHER_FILTER = False  # 天气
@@ -521,4 +560,8 @@ def main():
     print(f"总耗时：{elapsed:.2f} 秒，进程数：{processes or 'auto'}，chunksize={CHUNKSIZE}")
 
 if __name__ == "__main__":
-    main()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--flask":
+        app.run(debug=True)
+    else:
+        main()
