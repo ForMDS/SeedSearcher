@@ -1,4 +1,5 @@
 from flask import Flask, send_from_directory, request, jsonify
+from flask_cors import CORS
 import os
 import time
 from functools import partial
@@ -14,6 +15,18 @@ from functions.night_events import predict_night_event_for_day
 
 dist_path = os.path.join(os.path.dirname(__file__), 'frontend', 'dist')
 app = Flask(__name__, static_folder=dist_path, template_folder=dist_path)
+
+# 启用 CORS（仅开放 /api/* 路径），允许本地开发端口访问
+_allowed_origins = [
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+]
+CORS(
+    app,
+    resources={r"/api/*": {"origins": _allowed_origins}},
+    supports_credentials=True,
+    allow_headers=["Content-Type", "Authorization", "access-token"],
+)
 
 # 首页和静态资源
 @app.route('/', defaults={'path': ''})
