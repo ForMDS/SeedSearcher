@@ -3,7 +3,7 @@ import { ref } from 'vue'
 import http from '@/utils/http.js'
 
 // 简易表单参数
-const seed = ref(12345)
+const seed = ref()
 const start = ref(1)
 const end = ref(28)
 const minCount = ref(5)
