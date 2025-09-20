@@ -98,7 +98,8 @@ function toWeatherPage() {
     </p>
 
     <div class="form">
-      <button @click="toWeatherPage">天气搜索</button>
+      <!-- <button @click="toWeatherPage">天气搜索</button> -->
+      <el-button @click="toWeatherPage">天气搜索</el-button>
       <!-- 种子范围 -->
       <div class="section">
         <h3>种子范围</h3>
