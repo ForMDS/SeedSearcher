@@ -9,7 +9,7 @@ const baseURL = (import.meta.env && import.meta.env.VITE_API_BASE)
 // 创建axios实例
 const service = axios.create({
   baseURL,
-  timeout: 20000,
+  timeout: 200000,
 })
 
 // 请求拦截器
