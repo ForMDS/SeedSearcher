@@ -1,4 +1,16 @@
 from flask import Blueprint, request, jsonify
+from functools import partial
+import os
+
+# Windows 多进程支持
+if __name__ != '__main__' and os.name == 'nt':
+    try:
+        import multiprocessing
+        multiprocessing.freeze_support()
+    except:
+        pass
+
+from utils.scan_engine import run_scan
 from functions.weather import WeatherPredictor
 from functions.mines import MinesPredictor
 from functions.chests import ChestsPredictor
@@ -22,6 +34,170 @@ from config import (
 )
 
 bp = Blueprint('api', __name__, url_prefix='/api')
+
+# 全局 worker 函数（多进程序列化需要）
+def search_worker_multiprocess(args):
+    """
+    多进程 worker 函数 - 必须在模块级别定义以支持序列化
+    args: (seed, 参数字典)
+    """
+    seed, params = args
+    
+    # 解包参数
+    enable_weather = params['enable_weather']
+    weather_clauses = params['weather_clauses']
+    weather_targets = params['weather_targets']
+    enable_mines = params['enable_mines']
+    mines_start_day = params['mines_start_day']
+    mines_end_day = params['mines_end_day']
+    floor_start = params['floor_start']
+    floor_end = params['floor_end']
+    require_no_infested = params['require_no_infested']
+    enable_chests = params['enable_chests']
+    chest_rules_mode = params['chest_rules_mode']
+    chest_rules = params['chest_rules']
+    enable_desert = params['enable_desert']
+    require_leah = params['require_leah']
+    require_jas = params['require_jas']
+    enable_saloon = params['enable_saloon']
+    saloon_start_day = params['saloon_start_day']
+    saloon_end_day = params['saloon_end_day']
+    saloon_daily_luck = params['saloon_daily_luck']
+    saloon_has_book = params['saloon_has_book']
+    saloon_require_min_hit = params['saloon_require_min_hit']
+    enable_night_event = params['enable_night_event']
+    night_check_day = params['night_check_day']
+    night_greenhouse_unlocked = params['night_greenhouse_unlocked']
+    use_legacy = params['use_legacy']
+    
+    # 默认返回容器（短路时也能返回）
+    matched = []
+    mines_detail = []
+    chests_detail = {}
+    desert_detail = {}
+    saloon_out = None
+    saloon_tag = None
+    saloon_ok = True
+    night_detail = None
+    night_ok = True
+
+    tasks = []  # (name, cost_estimate, fn)
+
+    # 夜间事件
+    if enable_night_event:
+        cost_night = 1
+        def _eval_night():
+            nonlocal night_detail, night_ok
+            ne = predict_night_event_for_day(
+                seed,
+                night_check_day,
+                day_adjust=0,
+                greenhouse_unlocked=night_greenhouse_unlocked,
+            )
+            night_detail = ne
+            night_ok = getattr(ne, 'is_fairy', False)
+            return night_ok
+        tasks.append(("night", cost_night, _eval_night))
+
+    # 沙漠节
+    if enable_desert:
+        cost_desert = 3  # 固定 3 天
+        def _eval_desert():
+            nonlocal desert_detail
+            ok = True
+            df = DesertFestivalPredictor(
+                game_id=seed,
+                use_legacy=use_legacy,
+                year=1,
+                leo_moved=False,
+                debug=False
+            )
+            res = df.vendors_for_three_days()
+            v15, v16, v17 = res[0], res[1], res[2]
+            desert_detail = {"春15": v15, "春16": v16, "春17": v17}
+            has_leah = any("Leah" in vendors for vendors in (v15, v16, v17))
+            has_jas  = any("Jas"  in vendors for vendors in (v15, v16, v17))
+            if require_leah and not has_leah:
+                ok = False
+            if require_jas and not has_jas:
+                ok = False
+            return ok
+        tasks.append(("desert", cost_desert, _eval_desert))
+
+    # 宝箱
+    if enable_chests and chest_rules:
+        unique_levels = len(collect_levels_from_rules(chest_rules))
+        cost_chests = max(1, unique_levels)
+        def _eval_chests():
+            nonlocal chests_detail
+            cp = ChestsPredictor(game_id=seed, use_legacy=use_legacy)
+            ok, detail = check_chest_rules_nested(cp, chest_rules, chest_rules_mode)
+            chests_detail = detail
+            return ok
+        tasks.append(("chests", cost_chests, _eval_chests))
+
+    # 天气（多区间 AND）
+    if enable_weather and weather_clauses:
+        # 估算成本：所有子区间长度之和（更贴近实际）
+        cost_weather = max(1, sum(int(c["end"]) - int(c["start"]) + 1 for c in weather_clauses))
+        def _eval_weather():
+            nonlocal matched
+            wp = WeatherPredictor(game_id=seed, use_legacy=use_legacy)
+            ok, matched_days = evaluate_weather_clauses(wp, weather_clauses, tuple(weather_targets))
+            matched = matched_days
+            return ok
+        tasks.append(("weather", cost_weather, _eval_weather))
+
+    # 垃圾桶
+    if enable_saloon:
+        span_saloon = max(0, saloon_end_day - saloon_start_day + 1)
+        cost_saloon = max(1, span_saloon * 220)  # 经验系数
+        def _eval_saloon():
+            nonlocal saloon_out, saloon_tag, saloon_ok
+            saloon_ok, saloon_tag, saloon_out = evaluate_saloon_trash_range(
+                seed,
+                start_day=saloon_start_day,
+                end_day=saloon_end_day,
+                daily_luck=saloon_daily_luck,
+                has_garbage_book=saloon_has_book,
+                daily_luck_by_day=None,
+                require_min_hit_days=saloon_require_min_hit,
+            )
+            return saloon_ok
+        tasks.append(("saloon", cost_saloon, _eval_saloon))
+
+    # 矿井
+    if enable_mines:
+        span_mines = max(0, mines_end_day - mines_start_day + 1)
+        cost_mines = max(1, span_mines * 1000)  # 经验系数（相对最贵）
+        def _eval_mines():
+            nonlocal mines_detail
+            mp = MinesPredictor(game_id=seed, use_legacy=use_legacy)
+            if require_no_infested:
+                ok, mines_detail_local = no_infested_in_range(mp, mines_start_day, mines_end_day, floor_start, floor_end)
+                mines_detail = mines_detail_local
+                return ok
+            else:
+                mines_detail = mp.predict_infested_in_range(mines_start_day, mines_end_day)
+                return True
+        tasks.append(("mines", cost_mines, _eval_mines))
+
+    # 没开任何功能 → 直接通过
+    if not tasks:
+        return (seed, matched, mines_detail, chests_detail, desert_detail, True, saloon_out, saloon_tag, saloon_ok, night_detail, night_ok)
+
+    # 动态排序 + 短路
+    tasks.sort(key=lambda x: x[1])
+    for task_name, _cost, fn in tasks:
+        try:
+            if not fn():
+                # 短路：第一个失败就返回
+                return (seed, matched, mines_detail, chests_detail, desert_detail, False, saloon_out, saloon_tag, saloon_ok, night_detail, night_ok)
+        except Exception as e:
+            return (seed, matched, mines_detail, chests_detail, desert_detail, False, saloon_out, saloon_tag, saloon_ok, night_detail, night_ok)
+
+    # 全部通过
+    return (seed, matched, mines_detail, chests_detail, desert_detail, True, saloon_out, saloon_tag, saloon_ok, night_detail, night_ok)
 
 @bp.post('/weather')
 def api_weather():
@@ -198,182 +374,83 @@ def api_search():
     
     use_legacy = bool(data.get('use_legacy', USE_LEGACY))
     
-    # 改用原版 worker 函数逻辑 - 带动态成本估算和短路优化
-    def search_worker(seed: int) -> dict:
-        """
-        完全复制 app.py 的 worker 函数，包括动态排序 + 短路优化
-        """
-        # 默认返回容器（短路时也能返回）
-        matched = []
-        mines_detail = []
-        chests_detail = {}
-        desert_detail = {}
-        saloon_out = None
-        saloon_tag = None
-        saloon_ok = True
-        night_detail = None
-        night_ok = True
-
-        tasks = []  # (name, cost_estimate, fn)
-
-        # 夜间事件
-        if enable_night_event:
-            cost_night = 1
-            def _eval_night():
-                nonlocal night_detail, night_ok
-                ne = predict_night_event_for_day(
-                    seed,
-                    night_check_day,
-                    day_adjust=0,
-                    greenhouse_unlocked=night_greenhouse_unlocked,
-                )
-                night_detail = ne
-                night_ok = getattr(ne, 'is_fairy', False)
-                return night_ok
-            tasks.append(("night", cost_night, _eval_night))
-
-        # 沙漠节
-        if enable_desert:
-            cost_desert = 3  # 固定 3 天
-            def _eval_desert():
-                nonlocal desert_detail
-                ok = True
-                df = DesertFestivalPredictor(
-                    game_id=seed,
-                    use_legacy=use_legacy,
-                    year=1,
-                    leo_moved=False,
-                    debug=False
-                )
-                res = df.vendors_for_three_days()
-                v15, v16, v17 = res[0], res[1], res[2]
-                desert_detail = {"春15": v15, "春16": v16, "春17": v17}
-                has_leah = any("Leah" in vendors for vendors in (v15, v16, v17))
-                has_jas  = any("Jas"  in vendors for vendors in (v15, v16, v17))
-                if require_leah and not has_leah:
-                    ok = False
-                if require_jas and not has_jas:
-                    ok = False
-                return ok
-            tasks.append(("desert", cost_desert, _eval_desert))
-
-        # 宝箱
-        if enable_chests and chest_rules:
-            unique_levels = len(collect_levels_from_rules(chest_rules))
-            cost_chests = max(1, unique_levels)
-            def _eval_chests():
-                nonlocal chests_detail
-                cp = ChestsPredictor(game_id=seed, use_legacy=use_legacy)
-                ok, detail = check_chest_rules_nested(cp, chest_rules, chest_rules_mode)
-                chests_detail = detail
-                return ok
-            tasks.append(("chests", cost_chests, _eval_chests))
-
-        # 天气（多区间 AND）
-        if enable_weather and weather_clauses:
-            # 估算成本：所有子区间长度之和（更贴近实际）
-            cost_weather = max(1, sum(int(c["end"]) - int(c["start"]) + 1 for c in weather_clauses))
-            def _eval_weather():
-                nonlocal matched
-                wp = WeatherPredictor(game_id=seed, use_legacy=use_legacy)
-                ok, matched_days = evaluate_weather_clauses(wp, weather_clauses, tuple(weather_targets))
-                matched = matched_days
-                return ok
-            tasks.append(("weather", cost_weather, _eval_weather))
-
-        # 垃圾桶
-        if enable_saloon:
-            span_saloon = max(0, saloon_end_day - saloon_start_day + 1)
-            cost_saloon = max(1, span_saloon * 220)  # 经验系数
-            def _eval_saloon():
-                nonlocal saloon_out, saloon_tag, saloon_ok
-                saloon_ok, saloon_tag, saloon_out = evaluate_saloon_trash_range(
-                    seed,
-                    start_day=saloon_start_day,
-                    end_day=saloon_end_day,
-                    daily_luck=saloon_daily_luck,
-                    has_garbage_book=saloon_has_book,
-                    daily_luck_by_day=None,
-                    require_min_hit_days=saloon_require_min_hit,
-                )
-                return saloon_ok
-            tasks.append(("saloon", cost_saloon, _eval_saloon))
-
-        # 矿井
-        if enable_mines:
-            span_mines = max(0, mines_end_day - mines_start_day + 1)
-            cost_mines = max(1, span_mines * 1000)  # 经验系数（相对最贵）
-            def _eval_mines():
-                nonlocal mines_detail
-                mp = MinesPredictor(game_id=seed, use_legacy=use_legacy)
-                if require_no_infested:
-                    ok, mines_detail_local = no_infested_in_range(mp, mines_start_day, mines_end_day, floor_start, floor_end)
-                    mines_detail = mines_detail_local
-                    return ok
-                else:
-                    mines_detail = mp.predict_infested_in_range(mines_start_day, mines_end_day)
-                    return True
-            tasks.append(("mines", cost_mines, _eval_mines))
-
-        # 没开任何功能 → 直接通过
-        if not tasks:
-            return {
-                'seed': seed,
-                'ok': True,
-                'conditions_enabled': 0,
-                'details': {}
-            }
-
-        # 动态排序 + 短路
-        tasks.sort(key=lambda x: x[1])
-        for task_name, _cost, fn in tasks:
-            try:
-                if not fn():
-                    # 短路：第一个失败就返回
-                    return {
-                        'seed': seed,
-                        'ok': False,
-                        'failed_on': task_name,
-                        'conditions_enabled': len(tasks),
-                        'details': {}
-                    }
-            except Exception as e:
-                return {
-                    'seed': seed,
-                    'ok': False,
-                    'failed_on': task_name,
-                    'error': str(e),
-                    'conditions_enabled': len(tasks),
-                    'details': {}
-                }
-
-        # 全部通过
-        return {
-            'seed': seed,
-            'ok': True,
-            'conditions_enabled': len(tasks),
-            'details': {
-                'weather': {'matched_count': len(matched)} if enable_weather else None,
-                'mines': {'infested_days': len([d for d in mines_detail if d.floors])} if enable_mines else None,
-                'chests': {'rules_count': len(chest_rules)} if enable_chests else None,
-                'desert': {'vendors_days': len(desert_detail)} if enable_desert else None,
-                'saloon': {'hit_days': saloon_out['summary'].get('dish_days_hit', 0) if saloon_out else 0} if enable_saloon else None,
-                'night_event': {'event': getattr(night_detail, 'event', None) if night_detail else None} if enable_night_event else None,
-            }
-        }
+    # 准备参数字典（传递给 worker 函数）
+    worker_params = {
+        'enable_weather': enable_weather,
+        'weather_clauses': weather_clauses,
+        'weather_targets': weather_targets,
+        'enable_mines': enable_mines,
+        'mines_start_day': mines_start_day,
+        'mines_end_day': mines_end_day,
+        'floor_start': floor_start,
+        'floor_end': floor_end,
+        'require_no_infested': require_no_infested,
+        'enable_chests': enable_chests,
+        'chest_rules_mode': chest_rules_mode,
+        'chest_rules': chest_rules,
+        'enable_desert': enable_desert,
+        'require_leah': require_leah,
+        'require_jas': require_jas,
+        'enable_saloon': enable_saloon,
+        'saloon_start_day': saloon_start_day,
+        'saloon_end_day': saloon_end_day,
+        'saloon_daily_luck': saloon_daily_luck,
+        'saloon_has_book': saloon_has_book,
+        'saloon_require_min_hit': saloon_require_min_hit,
+        'enable_night_event': enable_night_event,
+        'night_check_day': night_check_day,
+        'night_greenhouse_unlocked': night_greenhouse_unlocked,
+        'use_legacy': use_legacy,
+    }
     
-    # 生成种子列表并批量处理
+    # 生成种子列表并准备多进程参数
     seeds = list(range(seed_start, seed_start + seed_range + 1))
+    seed_args = [(seed, worker_params) for seed in seeds]
     
-    # 简单的单线程处理（避免复杂度，前端可以控制范围）
-    all_results = []
-    hit_seeds = []
+    # 多进程处理（性能优化）
+    import time
+    import os
+    start_time = time.time()
     
-    for seed in seeds:
-        result = search_worker(seed)
-        all_results.append(result)
-        if result['ok']:
-            hit_seeds.append(seed)
+    # Windows 多进程兼容性检查
+    use_multiprocessing = True
+    try:
+        if os.name == 'nt':  # Windows
+            import multiprocessing
+            multiprocessing.set_start_method('spawn', force=True)
+    except Exception as e:
+        print(f"[WARNING] 无法设置多进程启动方法: {e}")
+        use_multiprocessing = False
+    
+    if use_multiprocessing:
+        try:
+            # print(f"[DEBUG] 开始多进程处理 {len(seeds)} 个种子...")
+            results = run_scan(seed_args, search_worker_multiprocess, processes=None, chunksize=min(1000, max(1, len(seeds) // 8)))
+            
+            hit_seeds = []
+            for seed, matched, mines_detail, chests_detail, desert_detail, ok, saloon_out, saloon_tag, saloon_ok, night_detail, night_ok in results:
+                if ok:
+                    hit_seeds.append(seed)
+            
+            elapsed = time.time() - start_time
+            # print(f"[DEBUG] 多进程处理完成，耗时 {elapsed:.2f} 秒，命中 {len(hit_seeds)} 个种子")
+                    
+        except Exception as e:
+            print(f"[ERROR] 多进程处理失败: {e}")
+            use_multiprocessing = False
+    
+    if not use_multiprocessing:
+        # print("[DEBUG] 使用单线程处理...")
+        # 降级到单线程
+        hit_seeds = []
+        for seed_arg in seed_args:
+            result = search_worker_multiprocess(seed_arg)
+            _, _, _, _, _, ok, _, _, _, _, _ = result
+            if ok:
+                hit_seeds.append(seed_arg[0])  # seed_arg[0] 是种子值
+        
+        elapsed = time.time() - start_time
+        # print(f"[DEBUG] 单线程处理完成，耗时 {elapsed:.2f} 秒，命中 {len(hit_seeds)} 个种子")
     
     return jsonify({
         'seed_start': seed_start,
@@ -389,6 +466,6 @@ def api_search():
             'saloon': enable_saloon,
             'night_event': enable_night_event
         },
-        # 可选：返回前几个详细结果作为示例
-        'sample_results': all_results[:5] if len(all_results) <= 50 else []
+        # 可选：返回前几个详细结果作为示例（多进程版本简化返回）
+        'sample_results': []
     })

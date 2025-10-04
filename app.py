@@ -320,6 +320,7 @@ def main():
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "--flask":
-        app.run(debug=True)
+        # 禁用 debug 模式以支持多进程
+        app.run(debug=False, host='127.0.0.1', port=5000)
     else:
         main()
