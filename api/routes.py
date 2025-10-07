@@ -355,7 +355,26 @@ def api_search():
     
     enable_chests = bool(data.get('enable_chests', False))
     chest_rules_mode = str(data.get('chest_rules_mode', 'ALL'))
-    chest_rules = data.get('chest_rules', [])
+    chest_rules_raw = data.get('chest_rules', [])
+    
+    # 转换 chest_rules：将列表转换为元组（JSON 传输会把元组变成列表）
+    def convert_chest_rules(rules):
+        """递归转换列表为元组格式，以匹配后端期望的数据结构"""
+        result = []
+        for rule in rules:
+            if isinstance(rule, list):
+                # 检查是否为 atom（长度为2且第一个元素是数字）
+                if len(rule) == 2 and isinstance(rule[0], int) and isinstance(rule[1], str):
+                    # atom: [level, item] -> (level, item)
+                    result.append(tuple(rule))
+                else:
+                    # OR 组或 AND 子组：递归转换
+                    result.append(convert_chest_rules(rule))
+            else:
+                result.append(rule)
+        return result
+    
+    chest_rules = convert_chest_rules(chest_rules_raw)
     
     enable_desert = bool(data.get('enable_desert', False))
     require_leah = bool(data.get('require_leah', False))

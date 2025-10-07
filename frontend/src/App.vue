@@ -27,7 +27,7 @@ const router = useRouter()
 <style scoped lang="scss">
 .app-container {
   .main-container {
-    height: 100vh;
+    min-height: 100vh;
     background-color: #F2F3F5;
     .header {
       display: flex;
