@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch } from 'vue'
+import { ref } from 'vue'
 import { Delete, QuestionFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import http from '@/utils/http.js'
@@ -31,7 +31,22 @@ const params = ref({
   // 宝箱筛选
   enable_chests: false,
   chest_rules_mode: 'ALL', // ALL / ANY
-  chest_rules: []
+  chest_rules: [],
+  // 沙漠节筛选
+  enable_desert: false,
+  require_leah: true, // 是否需要莉亚
+  require_jas: true, // 是否需要贾斯
+  // 酒吧垃圾桶筛选
+  enable_saloon: false,
+  saloon_start_day: 1,
+  saloon_end_day: 7,
+  saloon_daily_luck: -0.1,
+  saloon_has_book: false,
+  saloon_require_min_hit: 1,
+  // 夜间事件
+  enable_night_event: false,
+  night_check_day: 1,
+  night_greenhouse_unlocked: false,
 })
 const rules = ref({
   seed_start: [
@@ -349,7 +364,7 @@ function searchSeeds() {
       loading.value = true
       const res = await http.post('/api/search', requestData)
       console.log('搜索结果：', res)
-      ElMessage.success(`搜索完成！找到 ${res.data?.results?.length || 0} 个符合条件的种子`)
+      // ElMessage.success(`搜索完成！找到 ${res.data?.results?.length || 0} 个符合条件的种子`)
     } catch (error) {
       const errorMsg = error?.response?.data?.message || error?.message || '搜索失败'
       ElMessage.error(errorMsg)
@@ -362,217 +377,327 @@ function searchSeeds() {
 </script>
 
 <template>
-  <el-form :model="params" :rules="rules" ref="seedForm">
-    <el-form-item label="是否启用旧随机：">
-      <el-switch v-model="params.use_legacy" disabled />
-    </el-form-item>
-    <el-form-item label="种子范围：">
-      <div class="flex-c">
-        <el-form-item prop="seed_start" style="margin-bottom: 0;">
-          <el-input v-model="params.seed_start" style="width: 150px;" placeholder="开始值" @blur="handleSeedRangeBlur" />
+  <el-container>
+    <el-aside width="600px">
+      <el-form :model="params" :rules="rules" ref="seedForm">
+        <el-form-item label="是否启用旧随机：">
+          <el-switch v-model="params.use_legacy" disabled />
         </el-form-item>
-        <span class="connectors">至</span>
-        <el-form-item prop="seed_range" style="margin-bottom: 0;">
-          <el-input v-model="params.seed_range" style="width: 150px;" placeholder="结束值" @blur="handleSeedRangeBlur" />
-        </el-form-item>
-      </div>
-    </el-form-item>
-    <el-form-item label="筛选天气：">
-      <el-switch v-model="params.enable_weather" />
-      <el-button text type="primary" @click="addWeatherClause" v-if="params.enable_weather"
-        class="mgl-8">添加筛选条件</el-button>
-    </el-form-item>
-    <div v-if="params.enable_weather" class="filter-card weather-clauses">
-      <el-form-item label="天气类型：">
-        <el-checkbox-group v-model="params.weather_targets" class="weather-targets">
-          <el-checkbox v-for="option in weatherOptions" :key="option.value" :label="option.label"
-            :value="option.value" />
-        </el-checkbox-group>
-      </el-form-item>
-
-      <div class="clauses-container">
-        <div class="clause-item" v-for="(clause, index) in params.weather_clauses" :key="index">
-          <div class="clause-header">
-            <span class="clause-title">筛选条件 {{ index + 1 }}</span>
-            <el-button link type="danger" @click="params.weather_clauses.splice(index, 1)"
-              v-if="params.weather_clauses.length > 1" size="small">
-              <el-icon>
-                <Delete />
-              </el-icon>
-              删除
-            </el-button>
+        <el-form-item label="种子范围：">
+          <div class="flex-c">
+            <el-form-item prop="seed_start" style="margin-bottom: 0;">
+              <el-input v-model="params.seed_start" style="width: 150px;" placeholder="开始值"
+                @blur="handleSeedRangeBlur" />
+            </el-form-item>
+            <span class="connectors">至</span>
+            <el-form-item prop="seed_range" style="margin-bottom: 0;">
+              <el-input v-model="params.seed_range" style="width: 150px;" placeholder="结束值"
+                @blur="handleSeedRangeBlur" />
+            </el-form-item>
           </div>
+        </el-form-item>
+        <el-form-item label="天气筛选：">
+          <el-switch v-model="params.enable_weather" />
+          <el-button text type="primary" @click="addWeatherClause" v-if="params.enable_weather"
+            class="mgl-8">添加筛选条件</el-button>
+        </el-form-item>
+        <div v-if="params.enable_weather" class="filter-card weather-clauses">
+          <el-form-item label="天气类型：">
+            <el-checkbox-group v-model="params.weather_targets" class="weather-targets">
+              <el-checkbox v-for="option in weatherOptions" :key="option.value" :label="option.label"
+                :value="option.value" />
+            </el-checkbox-group>
+          </el-form-item>
 
-          <div class="clause-content">
-            <el-form-item label="开始日" class="clause-field">
-              <el-input v-model="clause.start" style="width: 80px;" placeholder="1"></el-input>
-            </el-form-item>
-            <span class="clause-separator">至</span>
-            <el-form-item label="结束日" class="clause-field">
-              <el-input v-model="clause.end" style="width: 80px;" placeholder="28"></el-input>
-            </el-form-item>
-            <el-form-item label="最少天数" class="clause-field">
-              <div class="input-with-suffix">
-                <el-input v-model="clause.min_count" style="width: 80px;" placeholder="5"></el-input>
-                <span class="field-suffix">天</span>
+          <div class="clauses-container">
+            <div class="clause-item" v-for="(clause, index) in params.weather_clauses" :key="index">
+              <div class="clause-header">
+                <span class="clause-title">筛选条件 {{ index + 1 }}</span>
+                <el-button link type="danger" @click="params.weather_clauses.splice(index, 1)"
+                  v-if="params.weather_clauses.length > 1" size="small">
+                  <el-icon>
+                    <Delete />
+                  </el-icon>
+                  删除
+                </el-button>
               </div>
+
+              <div class="clause-content">
+                <el-form-item label="开始日" class="clause-field">
+                  <el-input v-model="clause.start" style="width: 80px;" placeholder="1"></el-input>
+                </el-form-item>
+                <span class="clause-separator">至</span>
+                <el-form-item label="结束日" class="clause-field">
+                  <el-input v-model="clause.end" style="width: 80px;" placeholder="28"></el-input>
+                </el-form-item>
+                <el-form-item label="最少天数" class="clause-field">
+                  <div class="input-with-suffix">
+                    <el-input v-model="clause.min_count" style="width: 80px;" placeholder="5"></el-input>
+                    <span class="field-suffix">天</span>
+                  </div>
+                </el-form-item>
+              </div>
+            </div>
+          </div>
+        </div>
+        <el-form-item label="矿井筛选：">
+          <el-switch v-model="params.enable_mines" />
+        </el-form-item>
+        <div v-if="params.enable_mines" class="filter-card mines-clauses">
+          <el-checkbox v-model="params._require_no_infested" label="要求‘完全没有怪物/史莱姆层’" :true-value="1" :false-value="0"
+            @change="handleNoInfestedChange" />
+          <div class="flex-c align-base">
+            <el-form-item label="开始日" style="margin-bottom: 0;">
+              <el-input v-model="params.mines_start_day" style="width: 80px;" placeholder="开始日"></el-input>
+            </el-form-item>
+            <span class="connectors">至</span>
+            <el-form-item label="结束日" style="margin-bottom: 0;">
+              <el-input v-model="params.mines_end_day" style="width: 80px;" placeholder="结束日"></el-input>
+            </el-form-item>
+            <el-form-item label="起始层" style="margin-bottom: 0;" class="mgl-8">
+              <el-input v-model="params.floor_start" style="width: 80px;" placeholder="起始层"></el-input>
+            </el-form-item>
+            <span class="connectors">至</span>
+            <el-form-item label="结束层" style="margin-bottom: 0;">
+              <el-input v-model="params.floor_end" style="width: 80px;" placeholder="结束层"></el-input>
             </el-form-item>
           </div>
         </div>
-      </div>
-    </div>
-    <el-form-item label="矿井筛选：">
-      <el-switch v-model="params.enable_mines" />
-    </el-form-item>
-    <div v-if="params.enable_mines" class="filter-card mines-clauses">
-      <el-checkbox v-model="params._require_no_infested" label="要求‘完全没有怪物/史莱姆层’" :true-value="1" :false-value="0"
-        @change="handleNoInfestedChange" />
-      <div class="flex-c align-base">
-        <el-form-item label="开始日" style="margin-bottom: 0;">
-          <el-input v-model="params.mines_start_day" style="width: 80px;" placeholder="开始日"></el-input>
+        <el-form-item label="宝箱筛选：">
+          <el-switch v-model="params.enable_chests" />
         </el-form-item>
-        <span class="connectors">至</span>
-        <el-form-item label="结束日" style="margin-bottom: 0;">
-          <el-input v-model="params.mines_end_day" style="width: 80px;" placeholder="结束日"></el-input>
-        </el-form-item>
-        <el-form-item label="起始层" style="margin-bottom: 0;" class="mgl-8">
-          <el-input v-model="params.floor_start" style="width: 80px;" placeholder="起始层"></el-input>
-        </el-form-item>
-        <span class="connectors">至</span>
-        <el-form-item label="结束层" style="margin-bottom: 0;">
-          <el-input v-model="params.floor_end" style="width: 80px;" placeholder="结束层"></el-input>
-        </el-form-item>
-      </div>
-    </div>
-    <el-form-item label="宝箱筛选：">
-      <el-switch v-model="params.enable_chests" />
-    </el-form-item>
-    <div v-if="params.enable_chests" class="filter-card chests-clauses">
-      <!-- 预设模板 -->
-      <div class="preset-section">
-        <div class="section-title">
-          <span>快速选择预设</span>
-          <el-tooltip content="点击应用预设配置" placement="top">
-            <el-icon :size="16" style="margin-left: 4px; color: #909399;">
-              <QuestionFilled />
-            </el-icon>
-          </el-tooltip>
-        </div>
-        <div class="preset-list">
-          <div v-for="(preset, index) in chestPresets" :key="index" class="preset-card"
-            @click="applyChestPreset(preset)">
-            <div class="preset-name">📦 {{ preset.name }}</div>
-            <div class="preset-desc">{{ preset.description }}</div>
-          </div>
-        </div>
-      </div>
-
-      <el-divider />
-
-      <!-- 自定义规则 -->
-      <div class="custom-section">
-        <div class="section-title">自定义规则</div>
-
-        <el-form-item label="顶层模式：">
-          <el-radio-group v-model="params.chest_rules_mode">
-            <el-radio :value="'ALL'">全部满足 (AND)</el-radio>
-            <el-radio :value="'ANY'">满足任一 (OR)</el-radio>
-          </el-radio-group>
-        </el-form-item>
-
-        <!-- 规则列表 -->
-        <div class="rules-container">
-          <div v-for="(rule, ruleIndex) in params.chest_rules" :key="ruleIndex" class="rule-card">
-            <div class="rule-header">
-              <span class="rule-title">
-                规则 {{ ruleIndex + 1 }}
-                <el-tag :type="rule.type === 'atom' ? 'success' : 'warning'" size="small" style="margin-left: 8px;">
-                  {{ rule.type === 'atom' ? '简单条件' : 'OR 组' }}
-                </el-tag>
-              </span>
-              <el-button link type="danger" @click="removeChestRule(ruleIndex)" size="small">
-                <el-icon>
-                  <Delete />
+        <div v-if="params.enable_chests" class="filter-card chests-clauses">
+          <!-- 预设模板 -->
+          <div class="preset-section">
+            <div class="section-title">
+              <span>快速选择预设</span>
+              <el-tooltip content="点击应用预设配置" placement="top">
+                <el-icon :size="16" style="margin-left: 4px; color: #909399; cursor: pointer;">
+                  <QuestionFilled />
                 </el-icon>
-                删除
-              </el-button>
+              </el-tooltip>
             </div>
-
-            <!-- 简单条件 (atom) -->
-            <div v-if="rule.type === 'atom'" class="rule-content">
-              <el-form-item label="楼层" style="margin-bottom: 0;">
-                <el-select v-model="rule.level" placeholder="选择楼层" style="width: 100px;"
-                  @change="(newLevel) => handleLevelChange(rule, newLevel)">
-                  <el-option v-for="level in chestLevels" :key="level" :label="`${level}层`" :value="level" />
-                </el-select>
-              </el-form-item>
-              <span class="rule-separator">=</span>
-              <el-form-item label="物品" style="margin-bottom: 0;">
-                <el-select v-model="rule.item" placeholder="选择物品" style="width: 140px;">
-                  <el-option v-for="item in getItemsByLevel(rule.level)" :key="item" :label="item" :value="item" />
-                </el-select>
-              </el-form-item>
+            <div class="preset-list">
+              <div v-for="(preset, index) in chestPresets" :key="index" class="preset-card"
+                @click="applyChestPreset(preset)">
+                <div class="preset-name">📦 {{ preset.name }}</div>
+                <div class="preset-desc">{{ preset.description }}</div>
+              </div>
             </div>
+          </div>
 
-            <!-- OR 组 -->
-            <div v-else-if="rule.type === 'or_group'" class="or-group-content">
-              <div v-for="(subGroup, subIndex) in rule.items" :key="subIndex" class="and-subgroup">
-                <div class="subgroup-header">
-                  <span class="subgroup-title">AND 子组 {{ subIndex + 1 }}</span>
-                  <el-button link type="danger" @click="removeAndSubGroup(rule, subIndex)" v-if="rule.items.length > 1"
-                    size="small">
+          <el-divider />
+
+          <!-- 自定义规则 -->
+          <div class="custom-section">
+            <div class="section-title">自定义规则</div>
+
+            <el-form-item label="顶层模式：">
+              <el-radio-group v-model="params.chest_rules_mode">
+                <el-radio :value="'ALL'">全部满足 (AND)</el-radio>
+                <el-radio :value="'ANY'">满足任一 (OR)</el-radio>
+              </el-radio-group>
+            </el-form-item>
+
+            <!-- 规则列表 -->
+            <div class="rules-container">
+              <div v-for="(rule, ruleIndex) in params.chest_rules" :key="ruleIndex" class="rule-card">
+                <div class="rule-header">
+                  <span class="rule-title">
+                    规则 {{ ruleIndex + 1 }}
+                    <el-tag :type="rule.type === 'atom' ? 'success' : 'warning'" size="small" style="margin-left: 8px;">
+                      {{ rule.type === 'atom' ? '简单条件' : 'OR 组' }}
+                    </el-tag>
+                  </span>
+                  <el-button link type="danger" @click="removeChestRule(ruleIndex)" size="small">
                     <el-icon>
                       <Delete />
                     </el-icon>
+                    删除
                   </el-button>
                 </div>
 
-                <div class="subgroup-atoms">
-                  <div v-for="(atom, atomIndex) in subGroup" :key="atomIndex" class="atom-item">
-                    <el-select v-model="atom.level" placeholder="楼层" style="width: 100px;"
-                      @change="(newLevel) => handleAtomLevelChange(atom, newLevel)">
+                <!-- 简单条件 (atom) -->
+                <div v-if="rule.type === 'atom'" class="rule-content">
+                  <el-form-item label="楼层" style="margin-bottom: 0;">
+                    <el-select v-model="rule.level" placeholder="选择楼层" style="width: 100px;"
+                      @change="(newLevel) => handleLevelChange(rule, newLevel)">
                       <el-option v-for="level in chestLevels" :key="level" :label="`${level}层`" :value="level" />
                     </el-select>
-                    <span class="atom-separator">=</span>
-                    <el-select v-model="atom.item" placeholder="物品" style="width: 140px;">
-                      <el-option v-for="item in getItemsByLevel(atom.level)" :key="item" :label="item" :value="item" />
+                  </el-form-item>
+                  <span class="rule-separator">=</span>
+                  <el-form-item label="物品" style="margin-bottom: 0;">
+                    <el-select v-model="rule.item" placeholder="选择物品" style="width: 140px;">
+                      <el-option v-for="item in getItemsByLevel(rule.level)" :key="item" :label="item" :value="item" />
                     </el-select>
-                    <el-button link type="danger" @click="removeAtomFromSubGroup(subGroup, atomIndex)"
-                      v-if="subGroup.length > 1" size="small" style="margin-left: 8px;">
-                      <el-icon>
-                        <Delete />
-                      </el-icon>
-                    </el-button>
+                  </el-form-item>
+                </div>
+
+                <!-- OR 组 -->
+                <div v-else-if="rule.type === 'or_group'" class="or-group-content">
+                  <div v-for="(subGroup, subIndex) in rule.items" :key="subIndex" class="and-subgroup">
+                    <div class="subgroup-header">
+                      <span class="subgroup-title">AND 子组 {{ subIndex + 1 }}</span>
+                      <el-button link type="danger" @click="removeAndSubGroup(rule, subIndex)"
+                        v-if="rule.items.length > 1" size="small">
+                        <el-icon>
+                          <Delete />
+                        </el-icon>
+                      </el-button>
+                    </div>
+
+                    <div class="subgroup-atoms">
+                      <div v-for="(atom, atomIndex) in subGroup" :key="atomIndex" class="atom-item">
+                        <el-select v-model="atom.level" placeholder="楼层" style="width: 100px;"
+                          @change="(newLevel) => handleAtomLevelChange(atom, newLevel)">
+                          <el-option v-for="level in chestLevels" :key="level" :label="`${level}层`" :value="level" />
+                        </el-select>
+                        <span class="atom-separator">=</span>
+                        <el-select v-model="atom.item" placeholder="物品" style="width: 140px;">
+                          <el-option v-for="item in getItemsByLevel(atom.level)" :key="item" :label="item"
+                            :value="item" />
+                        </el-select>
+                        <el-button link type="danger" @click="removeAtomFromSubGroup(subGroup, atomIndex)"
+                          v-if="subGroup.length > 1" size="small" style="margin-left: 8px;">
+                          <el-icon>
+                            <Delete />
+                          </el-icon>
+                        </el-button>
+                      </div>
+                      <el-button text type="primary" @click="addAtomToSubGroup(subGroup)" size="small"
+                        style="margin-top: 8px;">
+                        + 添加条件
+                      </el-button>
+                    </div>
                   </div>
-                  <el-button text type="primary" @click="addAtomToSubGroup(subGroup)" size="small"
-                    style="margin-top: 8px;">
-                    + 添加条件
+
+                  <el-button text type="primary" @click="addAndSubGroup(rule)" style="margin-top: 12px;">
+                    + 添加 AND 子组
                   </el-button>
                 </div>
               </div>
+            </div>
 
-              <el-button text type="primary" @click="addAndSubGroup(rule)" style="margin-top: 12px;">
-                + 添加 AND 子组
+            <!-- 添加规则按钮 -->
+            <div class="add-rule-buttons">
+              <el-button @click="addSimpleChestRule" type="primary" plain>
+                + 添加简单条件
+              </el-button>
+              <el-button @click="addOrGroupChestRule" type="warning" plain>
+                + 添加 OR 组
               </el-button>
             </div>
           </div>
         </div>
-
-        <!-- 添加规则按钮 -->
-        <div class="add-rule-buttons">
-          <el-button @click="addSimpleChestRule" type="primary" plain>
-            + 添加简单条件
-          </el-button>
-          <el-button @click="addOrGroupChestRule" type="warning" plain>
-            + 添加 OR 组
-          </el-button>
+        <el-form-item label="沙漠节筛选：">
+          <el-switch v-model="params.enable_desert" />
+        </el-form-item>
+        <div v-if="params.enable_desert" class="filter-card desert-clauses">
+          <el-checkbox v-model="params.require_leah" label='需要"莉亚"' />
+          <el-checkbox v-model="params.require_jas" label='需要"贾斯"' />
         </div>
-      </div>
-    </div>
-    <el-form-item class="mgt-16">
-      <el-button type="primary" @click="searchSeeds">搜索</el-button>
-    </el-form-item>
-  </el-form>
+        <el-form-item label="酒吧垃圾桶筛选：">
+          <el-switch v-model="params.enable_saloon" />
+        </el-form-item>
+        <div v-if="params.enable_saloon" class="filter-card saloon-clauses">
+          <el-form-item label="检查日期范围：">
+            <div class="flex-c align-base">
+              <el-form-item label="开始" style="margin-bottom: 0;">
+                <el-input-number v-model="params.saloon_start_day" :min="1" :max="112" :step="1"
+                  controls-position="right" style="width: 120px;" />
+              </el-form-item>
+              <span class="connectors">至</span>
+              <el-form-item label="结束" style="margin-bottom: 0;">
+                <el-input-number v-model="params.saloon_end_day" :min="1" :max="112" :step="1" controls-position="right"
+                  style="width: 120px;" />
+              </el-form-item>
+              <el-tooltip placement="top" effect="dark">
+                <template #content>
+                  1-28 = 春季<br />
+                  29-56 = 夏季<br />
+                  57-84 = 秋季<br />
+                  85-112 = 冬季
+                </template>
+                <el-icon :size="16" style="margin-left: 8px; color: #909399; cursor: help;">
+                  <QuestionFilled />
+                </el-icon>
+              </el-tooltip>
+            </div>
+          </el-form-item>
+
+          <el-form-item label="运势值：">
+            <div class="flex-c align-base">
+              <el-slider v-model="params.saloon_daily_luck" :min="-0.1" :max="0.1" :step="0.01"
+                :format-tooltip="(val) => val.toFixed(2)" style="width: 200px;" />
+              <span class="value-display">{{ params.saloon_daily_luck.toFixed(2) }}</span>
+              <el-tooltip placement="top" effect="dark">
+                <template #content>
+                  运势影响命中概率：<br />
+                  -0.1（最低）→ 10% 基础概率<br />
+                  0.0（中等）→ 20% 基础概率<br />
+                  +0.1（最高）→ 30% 基础概率
+                </template>
+                <el-icon :size="16" style="margin-left: 8px; color: #909399; cursor: help;">
+                  <QuestionFilled />
+                </el-icon>
+              </el-tooltip>
+            </div>
+          </el-form-item>
+
+          <el-form-item label="垃圾之书：">
+            <el-switch v-model="params.saloon_has_book" />
+            <span class="field-tip">（已读书可使命中概率 +20%）</span>
+          </el-form-item>
+
+          <el-form-item label="至少命中天数：">
+            <div class="flex-c align-base">
+              <el-input-number v-model="params.saloon_require_min_hit" :min="1" :max="28" controls-position="right"
+                style="width: 120px;" />
+              <span class="field-unit">天</span>
+              <el-tooltip placement="top" effect="dark">
+                <template #content>
+                  在指定日期范围内，至少几天能从<br />
+                  酒吧垃圾桶获得"今日特供"才算合格
+                </template>
+                <el-icon :size="16" style="margin-left: 8px; color: #909399; cursor: help;">
+                  <QuestionFilled />
+                </el-icon>
+              </el-tooltip>
+            </div>
+          </el-form-item>
+
+          <div class="info-card">
+            <div class="info-title">💡 功能说明</div>
+            <div class="info-content">
+              • <strong>筛选目标</strong>：只统计"今日特供 (Dish of the Day)"，其他物品不计入<br />
+              • <strong>概率机制</strong>：基础 20% + 运势值 + (垃圾书 20%)<br />
+              • <strong>日期范围</strong>：1-112 对应游戏内春夏秋冬四季（每季28天）<br />
+              • <strong>推荐配置</strong>：春季前7天，运势 -0.1，已读书，至少命中 2 天
+            </div>
+          </div>
+        </div>
+        <el-form-item label="夜间事件：">
+          <el-switch v-model="params.enable_night_event" />
+        </el-form-item>
+        <div v-if="params.enable_night_event" class="filter-card night-event-clauses">
+          <el-form-item label="检查日期">
+            <el-input-number v-model="params.night_check_day" :min="1" :max="28" :step="1" controls-position="right"
+              style="width: 120px;" />
+          </el-form-item>
+          <el-form-item label="温室是否解锁：">
+            <el-switch v-model="params.night_greenhouse_unlocked" />
+          </el-form-item>
+        </div>
+        <el-form-item class="mgt-16">
+          <el-button type="primary" @click="searchSeeds" :loading="loading">搜索</el-button>
+        </el-form-item>
+      </el-form>
+    </el-aside>
+    <el-main>
+
+    </el-main>
+  </el-container>
+
 </template>
 
 <style scoped lang="scss">
@@ -853,6 +978,64 @@ function searchSeeds() {
       gap: 12px;
       margin-top: 16px;
     }
+  }
+}
+
+// 酒吧垃圾桶筛选样式
+.saloon-clauses {
+  .date-tip {
+    font-size: 12px;
+    color: #909399;
+    margin-left: 12px;
+  }
+
+  .value-display {
+    min-width: 50px;
+    text-align: center;
+    font-weight: 500;
+    color: #409eff;
+    margin-left: 12px;
+  }
+
+  .field-tip {
+    font-size: 13px;
+    color: #909399;
+    margin-left: 12px;
+  }
+
+  .field-unit {
+    font-size: 14px;
+    color: #606266;
+    margin-left: 8px;
+  }
+
+  .info-card {
+    margin-top: 16px;
+    padding: 12px 16px;
+    background: linear-gradient(135deg, #e8f5e9 0%, #f1f8e9 100%);
+    border-radius: 8px;
+    border-left: 4px solid #4caf50;
+
+    .info-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: #2e7d32;
+      margin-bottom: 8px;
+    }
+
+    .info-content {
+      font-size: 13px;
+      line-height: 1.8;
+      color: #424242;
+
+      strong {
+        color: #1b5e20;
+      }
+    }
+  }
+
+  .el-slider {
+    margin-right: 0;
   }
 }
 </style>
