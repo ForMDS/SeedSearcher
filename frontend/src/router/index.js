@@ -4,12 +4,12 @@ const routes = [
   {
     path: '/',
     name: 'home',
-    component: () => import('../views/home.vue')
+    component: () => import('../views/home/home.vue')
   },
   {
     path: '/weather-forecast',
     name: 'WeatherForecast',
-    component: () => import('../views/weather-forecast.vue')
+    component: () => import('../views/weather-forecast/weather-forecast.vue')
   },
 ]
 
