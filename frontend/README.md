@@ -90,30 +90,6 @@ frontend/
 └── README.md           # 项目文档
 ```
 
-## 🏗️ 架构设计
-
-### 模块化重构
-项目采用 **constants / composables / components** 三层架构：
-
-1. **constants/** - 配置数据层
-   - 存放静态配置数据（天气选项、宝箱配置等）
-   
-2. **composables/** - 业务逻辑层（Composition API）
-   - 封装可复用的业务逻辑
-   - 管理响应式状态
-   - 返回状态和方法供组件使用
-   
-3. **components/** - 展示组件层
-   - 专注 UI 渲染
-   - 通过 props 接收数据
-   - 通过 emits 向上通信
-
-### 代码优化
-- ✅ 从单文件 1042 行重构为 15+ 个模块文件
-- ✅ 主文件精简至 216 行（-79%）
-- ✅ 符合 Vue 3 Composition API 最佳实践
-- ✅ 支持前端分页（性能优化）
-
 ## 🔌 API 接口
 
 前端通过 Axios 与后端 Flask API 通信：
