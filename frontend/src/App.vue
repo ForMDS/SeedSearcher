@@ -19,7 +19,7 @@ const goHome = () => {
 <template>
   <el-scrollbar height="100vh">
     <el-container class="app-container">
-      <el-container class="main-container">
+      <el-container class="main-container" style="min-width: 1440px;">
         <el-header class="header">
           <div class="header-left" @click="goHome">
             <div class="header-brand">
@@ -75,6 +75,8 @@ const goHome = () => {
 
 <style scoped lang="scss">
 .app-container {
+  min-width: 1440px; // 设置最小宽度，小于此宽度时出现横向滚动条
+  
   .main-container {
     min-height: 100vh;
     background-color: #F2F3F5;

@@ -94,8 +94,8 @@ export function useSeedSearch() {
       // 准备请求数据
       const requestData = {
         use_legacy: use_legacy.value,
-        seed_start: seed_start.value,
-        seed_range: seed_range.value,
+        seed_start: +seed_start.value,
+        seed_range: +seed_range.value,
         ...allFiltersData
       }
 
@@ -115,7 +115,7 @@ export function useSeedSearch() {
 
       loading.value = true
       const res = await http.post('/api/search', requestData)
-      console.log('搜索结果：', res)
+      return res
     } catch (error) {
       const errorMsg = error?.response?.data?.message || error?.message || '搜索失败'
       ElMessage.error(errorMsg)
