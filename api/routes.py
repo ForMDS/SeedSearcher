@@ -423,7 +423,8 @@ def api_search():
     }
     
     # 生成种子列表并准备多进程参数
-    seeds = list(range(seed_start, seed_start + seed_range + 1))
+    # seed_range 是结束种子值，不是范围长度
+    seeds = list(range(seed_start, seed_range + 1))
     seed_args = [(seed, worker_params) for seed in seeds]
     
     # 多进程处理（性能优化）
